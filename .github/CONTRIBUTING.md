@@ -68,6 +68,10 @@ If you're unsure whether something counts as security-sensitive, please ask in a
 - PR bumps updateIndex.json. I bump that on release when I decide to compile as a release.
 - You touch the Build tools or modify them without discussing it prior.
 
+## Your Code Commitments
+- Any AI generated code is fully understood
+- You took an honest effort to ensure your code is secure
+
 ## PR Checklist
 
 Before opening a PR, confirm:
@@ -78,6 +82,8 @@ Before opening a PR, confirm:
 - Commands are in the correct cog
 - Security-sensitive changes include a rationale in the description
 - You've tested the changes against a local instance of Nexa
+- Code Commitments were followed
+- Code that was generated in part with AI is let known in your PR description: "Code in my PR was produced with AI"
 
 PRs that don't check this beforehand will likely be rejected.
 
