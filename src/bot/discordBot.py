@@ -24,10 +24,11 @@ from .ui import SimpleMenu, MenuButton, ServerStatusEmbed
 from .cogs.general import GeneralCog
 from .cogs.instances import InstancesCog
 from .cogs.superuser import SuperUserCog
+from .cogs.operator import OperatorCog
 
 logger = nexaLoggerFactory.get_logger("DiscordBot")
 
-VERSION = "Nexa v0.2.2-beta"
+VERSION = "Nexa v0.3.0-beta-pre1"
 
 
 class NexaBot(commands.Bot):
@@ -113,9 +114,16 @@ class NexaBot(commands.Bot):
         )
     
     def _is_server_operator(self, user_id: int) -> bool:
+        #print(f"Server Ops Enable: {self.config.get("security.enableServerOperators", "Could not fetch.")}")
+        #print(f"Result: {user_id in (self.config.get("security.serverOperators") or [])}")
         return (
             self.config.get("security.enableServerOperators", False)
             and user_id in (self.config.get("security.serverOperators") or [])
+        )
+    
+    def _is_head_operator(self, user_id: int) -> bool:
+        return (
+            self.config.get("security.headOperator", False)
         )
 
     def _has_agreed_to_terms(self, user_id: int) -> bool:
@@ -208,6 +216,19 @@ class NexaBot(commands.Bot):
             "You do not have permission to use this command.", ephemeral=True
         )
         return False
+    
+    async def check_head_operator(self, interaction: Interaction) -> bool:
+        if not await self.check_guild(interaction):
+            await interaction.response.send_message(
+                "An unknown error occurred.", ephemeral=True
+            )
+            logger.warning(f"check_head_operator called for user {interaction.user} ({interaction.user.id}) in unauthorized guild {interaction.guild_id}.")
+            return False
+        if self._is_head_operator(interaction.user.id):
+            return True
+        await interaction.response.send_message(
+            "This command is restricted to the head operator. You do not have permission to use this command.", ephemeral=True
+        )
     # ---------------------------------------------------------------------------
     # Instance hydration
     # ---------------------------------------------------------------------------
@@ -248,6 +269,7 @@ class NexaBot(commands.Bot):
         await self.add_cog(InstancesCog(self))
         await self.add_cog(SuperUserCog(self))
         await self.add_cog(SystemCog(self))
+        await self.add_cog(OperatorCog(self))
 
     async def on_ready(self):
         logger.info(f"Logged in as {self.user}")

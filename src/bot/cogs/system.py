@@ -28,7 +28,7 @@ logger = nexaLoggerFactory.get_logger("SystemCog")
 # Update checker constants
 # ---------------------------------------------------------------------------
 
-CURRENT_NEXA_VERSION = "0.2.2"
+CURRENT_NEXA_VERSION = "0.3.0-beta-pre1"
 UPDATE_INDEX_URL = "https://raw.githubusercontent.com/StormCode-dev/Nexa/refs/heads/main/updateIndex.json"
 
 
@@ -128,9 +128,13 @@ class SystemCog(commands.Cog):
 
         if status == 1:
             operator_mentions = ""
-            if self.bot.config.get("security.enableServerOperators", False):
-                operator_ids = self.bot.config.get("security.serverOperators", []) or []
-                operator_mentions = " ".join(f"<@{uid}>" for uid in operator_ids) + " " if operator_ids else ""
+            # if self.bot.config.get("security.enableServerOperators", False):
+            #     operator_ids = self.bot.config.get("security.serverOperators", []) or []
+            #     operator_mentions = " ".join(f"<@{uid}>" for uid in operator_ids) + " " if operator_ids else ""
+
+            operator_id = self.bot.config.get("security.headOperator", 0)
+            operator_mentions = "".join(f"<@{operator_id}>")+" "
+
             await self._notify_health_channel(f"{operator_mentions} A new version of Nexa is available! Check the GitHub repository for the latest release.")
 
     @_update_checker.before_loop

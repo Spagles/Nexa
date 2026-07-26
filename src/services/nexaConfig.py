@@ -29,6 +29,12 @@ class NexaConfig:
         "security": {
             "enableServerOperators": False,
             "serverOperators": [],
+            "headOperator": 0,
+            "shadyAuthAttemptThreshold": 10,
+            "notifyHeadOperatorOnHighLevelOperation": True,
+            "notifyAllOpsOnHighLevelOperation": False,
+            "requireHeadOperatorApprovalForHighLevelOperation": True,
+            "sftpConnectionLengthInMins": 15,
             "allowNexaDesktop": False,
         },
         "networking": {
@@ -79,6 +85,12 @@ class NexaConfig:
         "security": {
             "enableServerOperators": bool,
             "serverOperators": list,
+            "headOperator": int,
+            "shadyAuthAttemptThreshold": int,
+            "notifyHeadOperatorOnHighLevelOperation": bool,
+            "notifyAllOpsOnHighLevelOperation": bool,
+            "requireHeadOperatorApprovalForHighLevelOperation": bool,
+            "sftpConnectionLengthInMins": int,
             "allowNexaDesktop": bool,
         },
         "networking": {
