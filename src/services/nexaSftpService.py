@@ -25,7 +25,7 @@ def clamp(value, min_val, max_val):
     return max(min_val, min(value, max_val))
 
 sessionTimeoutSecondsConfigEntry = clamp(config.get("security.sftpConnectionLengthInMins", 15), 5, 45)
-SESSION_TIMEOUT_SECONDS = 150  
+SESSION_TIMEOUT_SECONDS = sessionTimeoutSecondsConfigEntry * 60
 KEY_VALIDITY_POLL_SECONDS = 30  # how often the session checks its own authorization
 LOCAL_HOST = "127.0.0.1"
 LOCAL_PORT_RANGE = (19000, 19999) 
