@@ -1,7 +1,7 @@
 # ui.py
 # Under the MIT License.
 #
-# Shared UI primitives for NexaBot.
+# Shared UI primitives for Nexa.
 # Includes menus, embeds, and authorization components used across cogs.
 
 import inspect
@@ -53,12 +53,29 @@ class SimpleMenu(discord.ui.View):
         self.pages.append(MenuPage(title, description, on_enter, buttons))
         return self
 
-    async def send(self, interaction: Interaction):
+    async def send(self, interaction: Interaction, *, already_deferred: bool = False):
+        """
+        Sends this menu as the response to an interaction.
+
+        already_deferred: pass True if the interaction has already had
+        interaction.response.defer(...) (or any other response) called on it before
+        this method runs - e.g. by an auth/verification step earlier in the command.
+        When True, this uses interaction.followup.send(...) instead of
+        interaction.response.send_message(...), since a Discord interaction can only
+        be responded to once via .response, and calling it a second time raises
+        discord.errors.InteractionResponded. Defaults to False so every existing
+        caller keeps its current behavior unchanged.
+        """
         self._build_page()
-        await interaction.response.send_message(
-            embed=self._embed(), view=self, ephemeral=self.ephemeral
-        )
-        self.message = await interaction.original_response()
+        if already_deferred:
+            self.message = await interaction.followup.send(
+                embed=self._embed(), view=self, ephemeral=self.ephemeral, wait=True
+            )
+        else:
+            await interaction.response.send_message(
+                embed=self._embed(), view=self, ephemeral=self.ephemeral
+            )
+            self.message = await interaction.original_response()
         await self._run_on_enter(interaction)
 
     async def refresh(self, interaction: Interaction):
