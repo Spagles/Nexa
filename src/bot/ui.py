@@ -170,10 +170,11 @@ class ServerStatusEmbed:
             ServerStatus.STARTING: 0xFEE75C,
             ServerStatus.OFFLINE:  0xED4245,
             ServerStatus.SLEEPING: 0x5865F2,
+            ServerStatus.CRASHED:  0xED4245,
         }
         color = color_map.get(self.instance.status, 0x5865F2)
         embed = discord.Embed(
-            title=f"Server Status: {self.instance.name}",
+            title=f"Server Status: {self.instance.displayName}",
             color=color,
             timestamp=datetime.now(timezone.utc)
         )

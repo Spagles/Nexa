@@ -221,6 +221,7 @@ def main():
         for name in instance_names:
             try:
                 inst_cfg = registry.get_instance(name) or {}
+                disp_name = inst_cfg.get("displayName", str(name))
                 folder = build_folder_for_instance(instances_root, name, inst_cfg)
                 version = inst_cfg.get("version", "")
                 loader = inst_cfg.get("loaderType") or inst_cfg.get("loader") or ""
@@ -228,6 +229,7 @@ def main():
 
                 manager.add_instance(ServerInstance(
                     name=name,
+                    disp_name = disp_name,
                     folder=folder,
                     version=version,
                     loader=loader,
