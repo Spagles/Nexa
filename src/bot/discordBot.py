@@ -19,6 +19,7 @@ from bot.cogs.system import SystemCog
 from services.nexaConfig import NexaConfig, NexaInstanceRegistry
 from services.nexaDB import protectedDB
 from services import nexaLoggerFactory
+from bot.cmdServices.nxbotCmdInstanceEmbeds import InstanceEmbedTracker
 
 from .ui import SimpleMenu, MenuButton, ServerStatusEmbed
 from .cogs.general import GeneralCog
@@ -28,7 +29,7 @@ from .cogs.operator import OperatorCog
 
 logger = nexaLoggerFactory.get_logger("DiscordBot")
 
-VERSION = "Nexa v0.3.0-beta-pre1"
+VERSION = "Nexa v0.3.0-beta-pre2"
 
 
 class NexaBot(commands.Bot):
@@ -82,6 +83,9 @@ class NexaBot(commands.Bot):
             password=db_key,
             create_if_missing=True
         )
+
+        # Instance embed tracker
+        self.instanceEmbeds = InstanceEmbedTracker()
 
         self._hydrate_instances()
 
@@ -317,6 +321,30 @@ class NexaBot(commands.Bot):
         ]
         return hashlib.md5("|".join(parts).encode()).hexdigest()
 
+    async def _resolve_status_message(
+        self, channel: TextChannel, name: str, instance: ServerInstance
+    ) -> discord.Message:
+        """
+        Resolves the tracked status embed message for an instance, creating
+        and registering a new one if none is tracked or the tracked message
+        no longer exists.
+        """
+        link = self.instanceEmbeds.getEmbed(name)
+
+        if link:
+            try:
+                channel_id_str, message_id_str = link.split(":", 1)
+                msg_channel = self.get_channel(int(channel_id_str)) or channel
+                return await msg_channel.fetch_message(int(message_id_str))
+            except (discord.NotFound, discord.Forbidden, ValueError):
+                logger.warning(f"Tracked embed for '{name}' is stale or invalid. Creating a new one.")
+            except Exception as e:
+                logger.warning(f"Failed to resolve tracked embed for '{name}': {e}. Creating a new one.")
+
+        msg = await channel.send(embed=ServerStatusEmbed(instance).build())
+        self.instanceEmbeds.newEmbed(name, f"{msg.channel.id}:{msg.id}")
+        return msg
+
     async def _live_status_loop(self):
         await self.wait_until_ready()
         channel: TextChannel | None = self.get_channel(self.statusChannelID) if self.statusChannelID else None
@@ -324,21 +352,9 @@ class NexaBot(commands.Bot):
             logger.warning(f"Status channel '{self.statusChannelID}' not found or not configured.")
             return
 
-        existing: dict[str, discord.Message] = {}
-        async for msg in channel.history(limit=50):
-            if msg.author == self.user and msg.embeds:
-                title = msg.embeds[0].title or ""
-                for name in self.instance_manager.instances:
-                    if name in title and name not in existing:
-                        existing[name] = msg
-
         status_messages: dict[str, discord.Message] = {}
         for name, instance in self.instance_manager.instances.items():
-            if name in existing:
-                status_messages[name] = existing[name]
-            else:
-                msg = await channel.send(embed=ServerStatusEmbed(instance).build())
-                status_messages[name] = msg
+            status_messages[name] = await self._resolve_status_message(channel, name, instance)
 
         status_fingerprints: dict[str, str] = {}
 
@@ -365,6 +381,8 @@ class NexaBot(commands.Bot):
                     new_msg = await channel.send(embed=ServerStatusEmbed(instance).build())
                     status_messages[name] = new_msg
                     status_fingerprints[name] = fp
+                    self.instanceEmbeds.newEmbed(name, f"{new_msg.channel.id}:{new_msg.id}")
+                    logger.warning(f"Status embed for '{name}' was deleted externally. Recreated and re-tracked.")
                 except Exception as e:
                     logger.warning(f"Failed to update status embed for '{name}': {e}")
 

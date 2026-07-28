@@ -34,7 +34,7 @@ registry = NexaInstanceRegistry("NexaInstanceRegistry.yaml")
 # Protected DB password, guaranteed present by checkIfAbleToRun()
 db_key = os.environ.get("NEXABOT_PROTECTED_KEY")
 
-currentNexaVersion = "0.3.0-beta-pre1" # This should be updated with every release. Please do not touch it if a release is not being made.
+currentNexaVersion = "0.3.0-beta-pre2" # This should be updated with every release. Please do not touch it if a release is not being made.
 whereIsThatSillyUpdateIndex = "https://raw.githubusercontent.com/StormCode-dev/Nexa/refs/heads/main/updateIndex.json" # This should point to a raw JSON file in the repo with the latest version info. 
 # Please do not touch it. It points to the main branch, which is the correct branch.
 
@@ -221,6 +221,7 @@ def main():
         for name in instance_names:
             try:
                 inst_cfg = registry.get_instance(name) or {}
+                disp_name = inst_cfg.get("displayName", str(name))
                 folder = build_folder_for_instance(instances_root, name, inst_cfg)
                 version = inst_cfg.get("version", "")
                 loader = inst_cfg.get("loaderType") or inst_cfg.get("loader") or ""
@@ -228,6 +229,7 @@ def main():
 
                 manager.add_instance(ServerInstance(
                     name=name,
+                    disp_name = disp_name,
                     folder=folder,
                     version=version,
                     loader=loader,

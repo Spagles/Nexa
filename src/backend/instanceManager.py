@@ -5,8 +5,9 @@ from typing import Dict, Optional
 from pathlib import Path
 from enum import Enum
 import subprocess
+import os
 from backend.configLib import parseConfig, getConfigVal, parseServerProperties
-from services.nexaConfig import NexaInstanceConfig
+from services.nexaConfig import NexaInstanceConfig, NexaConfig
 from services import nexaLoggerFactory
 from mcrcon import MCRcon
 import asyncio
@@ -20,13 +21,15 @@ class ServerStatus(str, Enum):
     STARTING = "starting"
     ONLINE = "online"
     SLEEPING = "sleeping"
+    CRASHED = "crashed"
 
 
 logger = nexaLoggerFactory.get_logger("InstanceManager")
 
 class ServerInstance:
-    def __init__(self, name: str, folder: str, version: str = "Unknown", loader: str = "Unknown", icon_url: Optional[str] = None):
+    def __init__(self, name: str, disp_name: str, folder: str, version: str = "Unknown", loader: str = "Unknown", icon_url: Optional[str] = None):
         self.name = name
+        self.displayName = disp_name
         self.folder = Path(folder)
         self.version = version
         self.loader = loader
@@ -72,6 +75,10 @@ class ServerInstance:
         self.watchdog_restart_limit: int = self.config.get("functionality.watchdog.restart_limit", 3)
         self._watchdog_restart_count: int = 0
         self._stopping: bool = False
+
+        # Status ownership.
+        self.status_owner: Optional[str] = None
+        self._status_lock = asyncio.Lock()
  
     def _load_server_properties(self) -> dict:
         path = self.folder / "server.properties"
@@ -118,12 +125,57 @@ class ServerInstance:
         #print(f"self.players: {self.players}")
         return self.players, names
  
-    def update_status(self, status: ServerStatus):
+    async def acquire_status_lock(self, owner: str) -> bool:
+        """
+        Attempts to claim ownership of this instance's status. Fails fast
+        (does not wait/queue) if another owner already holds it, since two
+        operations (e.g. a start and a stop) legitimately racing for the
+        same instance is itself something that should be visible, not
+        silently serialized.
+        """
+        async with self._status_lock:
+            if self.status_owner is not None:
+                logger.warning(
+                    f"{self.name}: '{owner}' failed to acquire status lock, "
+                    f"already held by '{self.status_owner}'."
+                )
+                return False
+            self.status_owner = owner
+            logger.debug(f"{self.name}: status lock acquired by '{owner}'.")
+            return True
+
+    def release_status_lock(self, owner: str) -> None:
+        """
+        Releases ownership of this instance's status. No-ops (with a warning)
+        if the caller isn't the current owner, so a stale/late release can't
+        steal-clear a different operation's lock.
+        """
+        if self.status_owner != owner:
+            logger.warning(
+                f"{self.name}: '{owner}' attempted to release status lock "
+                f"held by '{self.status_owner}'. Ignored."
+            )
+            return
+        self.status_owner = None
+        logger.debug(f"{self.name}: status lock released by '{owner}'.")
+
+    def set_status(self, status: ServerStatus, owner: str) -> bool:
+        """
+        The only sanctioned way to change instance.status. Rejects (logs and
+        returns False) if 'owner' does not currently hold the status lock.
+        """
+        if self.status_owner != owner:
+            logger.warning(
+                f"{self.name}: rejected status write to '{status.value}' "
+                f"by non-owner '{owner}' (current owner: '{self.status_owner}')."
+            )
+            return False
         self.status = status
         try:
             self.players = int(self.players or 0)
         except Exception:
             self.players = 0
+        return True
 
     def get_protected_commands(self):
         """Returns a list of protected commands as defined in the instance's config"""
@@ -147,6 +199,8 @@ class InstanceManager:
     def __init__(self):
         self.instances: Dict[str, ServerInstance] = {}
         self._shutdown_task: Optional[asyncio.Task] = None
+        self.botConfig = NexaConfig("NexaBotConfig.yaml")
+        self.primaryInstanceName = self.botConfig.get("general.primaryInstance")
 
     async def start(self):
         """Call once the event loop is running to begin background tasks."""
@@ -160,40 +214,49 @@ class InstanceManager:
         return self.instances.get(name)
 
     def get_primary_instance(self) -> Optional[ServerInstance]:
-        return next(iter(self.instances.values()), None)
+        return self.instances.get(self.primaryInstanceName)
 
     async def start_instance(self, name: str):
         instance = self.get_instance(name)
         if not instance:
             raise ValueError(f"No instance named {name}")
 
-        instance.update_status(ServerStatus.STARTING)
+        owner = f"startup:{name}"
+        if not await instance.acquire_status_lock(owner):
+            print(f"[InstanceManager] Could not start {name}: status is currently locked by another operation.")
+            return
 
-        proc = subprocess.Popen(
-            instance.startCmd,
-            cwd=str(instance.folder),
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        try:
+            instance.set_status(ServerStatus.STARTING, owner=owner)
 
-        # A different one with console output on
-        #proc = subprocess.Popen(
-        #    instance.startCmd,
-        #    cwd=str(instance.folder),
-        #    shell=True,
-        #    stdout=subprocess.PIPE,
-        #    stderr=subprocess.STDOUT,
-        #    text=True
-        #)
+            proc = subprocess.Popen(
+                instance.startCmd,
+                cwd=str(instance.folder),
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
 
-        instance.active_process = proc
-        print(f"[InstanceManager] Launched {name} with PID {proc.pid}")
+            # A different one with console output on
+            #proc = subprocess.Popen(
+            #    instance.startCmd,
+            #    cwd=str(instance.folder),
+            #    shell=True,
+            #    stdout=subprocess.PIPE,
+            #    stderr=subprocess.STDOUT,
+            #    text=True
+            #)
 
-        await self._wait_for_rcon(instance)
+            instance.active_process = proc
+            print(f"[InstanceManager] Launched {name} with PID {proc.pid}")
 
-        instance.update_status(ServerStatus.ONLINE)
-        print(f"[InstanceManager] {name} is ONLINE")
+            ready = await self._wait_for_ready(instance, owner=owner)
+
+            if ready:
+                instance.set_status(ServerStatus.ONLINE, owner=owner)
+                print(f"[InstanceManager] {name} is ONLINE")
+        finally:
+            instance.release_status_lock(owner)
 
     async def stop_instance(self, name: str, update_embed_callback=None, hard: bool = False):
         """Stops the active server instance, optionally starts idle monitoring if join_to_wake=True"""
@@ -203,69 +266,135 @@ class InstanceManager:
 
         if instance.status in (ServerStatus.OFFLINE, ServerStatus.SLEEPING):
             return
-        
-        instance._stopping = True
 
-        if update_embed_callback:
-            await update_embed_callback(instance)
+        owner = f"shutdown:{name}"
+        if not await instance.acquire_status_lock(owner):
+            print(f"[InstanceManager] Could not stop {name}: status is currently locked by another operation.")
+            return
 
-        # Attempt graceful shutdown via RCON
-        if instance.rconPass and instance.active_process:
-            try:
-                with MCRcon("localhost", instance.rconPass, port=instance.rcon_port) as rcon:
-                    rcon.command("stop")
-            except Exception as e:
-                print(f"[InstanceManager] RCON stop failed: {e}")
+        try:
+            instance._stopping = True
 
-        # Wait for process exit
-        if instance.active_process:
-            for _ in range(10):
-                if instance.active_process.poll() is not None:
-                    break
-                await asyncio.sleep(2)
+            if update_embed_callback:
+                await update_embed_callback(instance)
 
-            # Force kill if still alive
-            if instance.active_process.poll() is None:
-                instance.active_process.terminate()
+            # Attempt graceful shutdown via RCON
+            if instance.rconPass and instance.active_process:
                 try:
-                    instance.active_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    instance.active_process.kill()
-                    print(f"[InstanceManager] WARNING: {instance.name} was forcibly killed. World data may be corrupted.", file=sys.stderr, flush=True)
-            instance.active_process = None
+                    with MCRcon("localhost", instance.rconPass, port=instance.rcon_port) as rcon:
+                        rcon.command("stop")
+                except Exception as e:
+                    print(f"[InstanceManager] RCON stop failed: {e}")
 
-        # Start idle monitor if join_to_wake is enabled
-        if instance.join_to_wake and not hard:
-            instance.update_status(ServerStatus.SLEEPING)
-            if update_embed_callback:
-                await update_embed_callback(instance)
-            asyncio.create_task(self._idle_monitor(instance))
-        else:
-            instance.update_status(ServerStatus.OFFLINE)
-            if update_embed_callback:
-                await update_embed_callback(instance)
+            # Wait for process exit
+            if instance.active_process:
+                for _ in range(10):
+                    if instance.active_process.poll() is not None:
+                        break
+                    await asyncio.sleep(2)
 
-    async def _wait_for_rcon(self, instance: ServerInstance, timeout: int = 300):
-        """Blocks until RCON responds or timeout is reached."""
-        elapsed = 0
+                # Force kill if still alive
+                if instance.active_process.poll() is None:
+                    instance.active_process.terminate()
+                    try:
+                        instance.active_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        instance.active_process.kill()
+                        print(f"[InstanceManager] WARNING: {instance.name} was forcibly killed. World data may be corrupted.", file=sys.stderr, flush=True)
+                instance.active_process = None
+
+            # Start idle monitor if join_to_wake is enabled
+            if instance.join_to_wake and not hard:
+                instance.set_status(ServerStatus.SLEEPING, owner=owner)
+                if update_embed_callback:
+                    await update_embed_callback(instance)
+                asyncio.create_task(self._idle_monitor(instance))
+            else:
+                instance.set_status(ServerStatus.OFFLINE, owner=owner)
+                if update_embed_callback:
+                    await update_embed_callback(instance)
+        finally:
+            instance.release_status_lock(owner)
+
+    async def _wait_for_ready(self, instance: ServerInstance, owner: str, timeout: int = 300) -> bool:
+        """
+        Blocks until the instance's log file reports the server as fully up
+        (the "Done (" line every vanilla/Paper/Fabric/NeoForge server prints
+        once the game port is open and ready to accept connections), the
+        process dies first (a startup crash), or the timeout is reached.
+
+        Returns True if the server became ready. Returns False otherwise,
+        after already updating instance.status appropriately:
+        - CRASHED if the process exited before printing the ready line
+          (a fundamental, unrecoverable startup failure).
+        - OFFLINE if the timeout was reached while the process was still
+          running (an ambiguous, potentially-recoverable case. Logged and
+          left for an operator or the watchdog to reattempt).
+        """
+        log_path = instance.folder / "logs" / "latest.log"
+
+        elapsed = 0.0
+        poll_interval = 1.0
+
+        # Do not keep one long-lived file stored in memory. Stale state = bad!!!
+        read_pos = 0
+        log_inode = None
+
         while elapsed < timeout:
-            try:
-                with MCRcon("localhost", instance.rconPass, port=instance.rcon_port) as rcon:
-                    response = rcon.command("list")
-                    if response is not None:
-                        return
-            except Exception:
-                await asyncio.sleep(2)
-                elapsed += 2
+            if instance.active_process and instance.active_process.poll() is not None:
+                logger.error(f"{instance.name} crashed during startup before becoming ready.")
+                print(f"[InstanceManager] CRITICAL: {instance.name} crashed during startup.", file=sys.stderr, flush=True)
+                instance.set_status(ServerStatus.CRASHED, owner=owner)
+                instance.active_process = None
+                return False
 
-        # Timeout reached. Server failed to start
-        
-        instance.update_status(ServerStatus.OFFLINE)
+            try:
+                current_size = log_path.stat().st_size if log_path.exists() else None
+                current_inode = log_path.stat().st_ino if log_path.exists() else None
+            except OSError:
+                current_size = None
+                current_inode = None
+
+            if current_size is not None:
+                if log_inode is None:
+                    # First time we've seen this file. A "latest.log" that already
+                    # exists at this point is almost always leftover from the
+                    # previous run (the JVM hasn't rotated/truncated it yet), and
+                    # will very likely already contain "Done (" from that prior
+                    # run. Only content appended after this point is meaningful,
+                    # so start reading from the current end, not byte 0.
+                    log_inode = current_inode
+                    read_pos = current_size
+                elif current_inode != log_inode:
+                    log_inode = current_inode
+                    read_pos = 0
+
+                if current_size > read_pos:
+                    try:
+                        with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
+                            log_file.seek(read_pos)
+                            new_lines = log_file.readlines()
+                            new_read_pos = log_file.tell()
+                    except OSError:
+                        new_lines = []
+                        new_read_pos = read_pos
+
+                    for line in new_lines:
+                        if "Done (" in line:
+                            return True
+                    read_pos = new_read_pos
+
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+        # Timeout reached, process still alive but never printed the ready line.
+        logger.warning(f"{instance.name} failed to report ready within {timeout} seconds. Recovering.")
+        print(f"[InstanceManager] {instance.name} failed to become ready within {timeout} seconds.", file=sys.stderr, flush=True)
         if instance.active_process and instance.active_process.poll() is None:
             instance.active_process.terminate()
         instance.active_process = None
-        print(f"[InstanceManager] Critical failure for {instance.name}: failed to start within {timeout} seconds.", file=sys.stderr, flush=True)
-        sys.exit(1)
+        instance.set_status(ServerStatus.OFFLINE, owner=owner)
+        return False
 
     async def _idle_monitor(self, instance: ServerInstance):
         """Monitors join attempts on idle instance and starts active server on join."""
@@ -310,7 +439,6 @@ class InstanceManager:
                                 instance.idle_process = None
                                 print(f"[InstanceManager] Idle instance stopped for {instance.name}")
 
-                            instance.update_status(ServerStatus.STARTING)
                             await self.start_instance(instance.name)
                             return
             except Exception as e:
@@ -394,17 +522,22 @@ class InstanceManager:
         Also runs watchdog logic. If a server process dies unexpectedly, attempts restart
         up to the configured restart_limit.
         """
+        owner = "status_loop"
+
         while True:
             #print("[InstanceManager] Checking instances...")
             for inst in list(self.instances.values()):
                 was_online = inst.status == ServerStatus.ONLINE
 
+                # Determine what, if anything, this tick would want to write.
+                desired_status = None
+
                 if inst.active_process and inst.active_process.poll() is None:
-                    # Process is alive
-                    inst.status = ServerStatus.ONLINE
-                    inst._watchdog_restart_count = 0  # reset counter on healthy tick
+                    if inst.status != ServerStatus.ONLINE:
+                        desired_status = ServerStatus.ONLINE
                 elif inst.idle_process and inst.idle_process.poll() is None:
-                    inst.status = ServerStatus.SLEEPING
+                    if inst.status != ServerStatus.SLEEPING:
+                        desired_status = ServerStatus.SLEEPING
                 else:
                     # No alive process
                     if was_online and inst.active_process is not None:
@@ -412,19 +545,42 @@ class InstanceManager:
 
                         if inst._stopping:
                             inst._stopping = False
-                            inst.update_status(ServerStatus.OFFLINE)
+                            desired_status = ServerStatus.OFFLINE
                         elif inst.watchdog_enabled:
                             if inst._watchdog_restart_count < inst.watchdog_restart_limit:
                                 inst._watchdog_restart_count += 1
                                 print(f"[Watchdog] {inst.name} crashed. Restart attempt {inst._watchdog_restart_count}/{inst.watchdog_restart_limit}.")
                                 asyncio.create_task(self.start_instance(inst.name))
+                                # start_instance() will acquire the lock itself
+                                # and own the STARTING/ONLINE/CRASHED/OFFLINE
+                                # transitions from here - nothing for us to write.
                             else:
                                 print(f"[Watchdog] {inst.name} has crashed {inst.watchdog_restart_limit} times. Giving up.", file=sys.stderr)
-                                inst.update_status(ServerStatus.OFFLINE)
+                                logger.error(f"{inst.name} has crashed {inst.watchdog_restart_limit} times and exhausted its restart limit. Marking as CRASHED.")
+                                desired_status = ServerStatus.CRASHED
                         else:
-                            inst.update_status(ServerStatus.OFFLINE)
+                            desired_status = ServerStatus.OFFLINE
                     else:
-                        inst.status = ServerStatus.OFFLINE
+                        # Don't clobber a sticky CRASHED status with a plain "no process" OFFLINE.
+                        if inst.status != ServerStatus.CRASHED and inst.status != ServerStatus.OFFLINE:
+                            desired_status = ServerStatus.OFFLINE
+
+                if desired_status is not None:
+                    if await inst.acquire_status_lock(owner):
+                        try:
+                            inst.set_status(desired_status, owner=owner)
+                            if desired_status == ServerStatus.ONLINE:
+                                inst._watchdog_restart_count = 0  # reset counter on healthy tick
+                        finally:
+                            inst.release_status_lock(owner)
+                    else:
+                        # Another operation (a start or stop in progress) owns
+                        # this instance's status right now. Skip the write this
+                        # tick rather than waiting or forcing it.
+                        logger.debug(
+                            f"{inst.name}: status_loop deferred writing "
+                            f"'{desired_status.value}', currently owned by '{inst.status_owner}'."
+                        )
 
                 if inst.status in (ServerStatus.ONLINE, ServerStatus.SLEEPING):
                     await inst.refresh_players()
