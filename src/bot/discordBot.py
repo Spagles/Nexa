@@ -172,7 +172,7 @@ class NexaBot(commands.Bot):
             description=(
                 "In order to use Nexa, you must agree to our data usage terms:\n\n"
                 "- We store a mapping of your Discord ID to any Minecraft accounts you link.\n"
-                "- We store a list of any Nexus apps you authorize.\n"
+                "- We store a list of any Nexa Routines you authorize.\n"
                 "- We store privacy settings you configure.\n\n"
                 "Your data is encrypted and never shared with third parties.\n\n"
                 "Click **I Agree** to continue."

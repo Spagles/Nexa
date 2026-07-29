@@ -85,7 +85,7 @@ class SimpleMenu(discord.ui.View):
     def _embed(self) -> discord.Embed:
         page = self.pages[self.index]
         embed = discord.Embed(title=page.title, description=page.description, color=0x5865F2)
-        embed.set_footer(text=f"Page {self.index + 1}/{len(self.pages)} • Nexabot")
+        embed.set_footer(text=f"Page {self.index + 1}/{len(self.pages)} • Nexa")
         return embed
 
     async def _run_on_enter(self, interaction: Interaction):
@@ -201,7 +201,7 @@ class ServerStatusEmbed:
         embed.add_field(name="Modloader", value=self.instance.loader,   inline=True)
         if self.instance.icon_url:
             embed.set_thumbnail(url=self.instance.icon_url)
-        embed.set_footer(text="Nexa V2")
+        embed.set_footer(text="Nexa")
         return embed
 
     def build_view(self) -> Optional["ServerStatusView"]:
