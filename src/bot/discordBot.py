@@ -29,7 +29,7 @@ from .cogs.operator import OperatorCog
 
 logger = nexaLoggerFactory.get_logger("DiscordBot")
 
-VERSION = "Nexa v0.3.0-beta-pre2"
+VERSION = "Nexa v0.3.0-beta-pre3"
 
 
 class NexaBot(commands.Bot):
@@ -310,6 +310,24 @@ class NexaBot(commands.Bot):
     # Live status loop
     # ---------------------------------------------------------------------------
 
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type != discord.InteractionType.component:
+            return
+    
+        custom_id = interaction.data.get("custom_id", "")
+        if not custom_id.startswith("start_instance:"):
+            return
+    
+        instance_name = custom_id.split(":", 1)[1]
+    
+        cog = self.get_cog("InstancesCog")
+        if cog is None:
+            await interaction.response.send_message("Instance commands are unavailable right now.", ephemeral=True)
+            return
+    
+        await cog.start_specific.callback(cog, interaction, instance_name)
+
+
     def _embed_fingerprint(self, embed: discord.Embed) -> str:
         """Cheap hash of the embed's visible content for change detection."""
         parts = [
@@ -341,7 +359,10 @@ class NexaBot(commands.Bot):
             except Exception as e:
                 logger.warning(f"Failed to resolve tracked embed for '{name}': {e}. Creating a new one.")
 
-        msg = await channel.send(embed=ServerStatusEmbed(instance).build())
+        status_embed = ServerStatusEmbed(instance)
+        view = status_embed.build_view()
+
+        msg = await channel.send(embed=status_embed.build(), view=view)
         self.instanceEmbeds.newEmbed(name, f"{msg.channel.id}:{msg.id}")
         return msg
 
@@ -364,21 +385,24 @@ class NexaBot(commands.Bot):
                 if not msg:
                     continue
 
-                embed = ServerStatusEmbed(instance).build()
+                status_embed = ServerStatusEmbed(instance)
+                embed = status_embed.build()
                 if instance.status == ServerStatus.SLEEPING:
                     embed.title += ": Sleeping"
                 if getattr(instance, "locked", False):
                     embed.title += " 🔒"
+                view = status_embed.build_view()
 
                 fp = self._embed_fingerprint(embed)
                 if status_fingerprints.get(name) == fp:
                     continue
-
+                
                 try:
-                    await msg.edit(embed=embed)
+                    await msg.edit(embed=embed, view=view)
                     status_fingerprints[name] = fp
                 except discord.NotFound:
-                    new_msg = await channel.send(embed=ServerStatusEmbed(instance).build())
+                    status_embed = ServerStatusEmbed(instance)
+                    new_msg = await channel.send(embed=status_embed.build(), view=status_embed.build_view())
                     status_messages[name] = new_msg
                     status_fingerprints[name] = fp
                     self.instanceEmbeds.newEmbed(name, f"{new_msg.channel.id}:{new_msg.id}")
