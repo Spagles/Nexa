@@ -157,6 +157,23 @@ class SimpleMenu(discord.ui.View):
 
 
 # ---------------------------------------------------------------------------
+# Views
+# ---------------------------------------------------------------------------
+
+class ServerStatusView(discord.ui.View):
+    def __init__(self, instance: ServerInstance):
+        super().__init__(timeout=None)
+        self.instance = instance
+
+        self.add_item(discord.ui.Button(
+            label="Start",
+            style=discord.ButtonStyle.success,
+            custom_id=f"start_instance:{instance.name}",
+            emoji="▶"
+        ))
+
+
+# ---------------------------------------------------------------------------
 # Embeds
 # ---------------------------------------------------------------------------
 
@@ -186,6 +203,15 @@ class ServerStatusEmbed:
             embed.set_thumbnail(url=self.instance.icon_url)
         embed.set_footer(text="Nexa V2")
         return embed
+
+    def build_view(self) -> Optional["ServerStatusView"]:
+        """
+        Returns the button view paired with this embed, or None if no
+        actionable button applies to the instance's current status.
+        """
+        if self.instance.status not in (ServerStatus.OFFLINE, ServerStatus.CRASHED):
+            return None
+        return ServerStatusView(self.instance)
 
 
 # ---------------------------------------------------------------------------

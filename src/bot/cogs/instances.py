@@ -117,7 +117,8 @@ class InstancesCog(commands.Cog):
 
         async def update_embed(inst: ServerInstance):
             if status_msg:
-                await status_msg.edit(embed=ServerStatusEmbed(inst).build())
+                status_embed = ServerStatusEmbed(inst)
+                await status_msg.edit(embed=status_embed.build(), view=status_embed.build_view())
 
         asyncio.create_task(self.bot.instance_manager.stop_instance(instance.name, update_embed_callback=update_embed))
 
