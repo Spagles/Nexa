@@ -327,7 +327,7 @@ class OperatorCog(commands.Cog):
                          f"{session.discordUserID}: {e}")
         finally:
             nxbotCmdGeneral.deregisterOperation(session.discordUserID)
-            tgt.locked = True
+            tgt.locked = False
             logger.info(f"Instance '{instance}' lock automatically removed at SFTP server teardown")
 
     # ------------------------------------------------------------------
@@ -673,10 +673,14 @@ class OperatorCog(commands.Cog):
 
                 if not done:
                     await interaction.followup.send("Head Operator approval timed out.", ephemeral=True)
+                    tgt.locked = False
+                    logger.info(f"Instance '{instance}' unlocked automatically by Nexa due to fsaccess command failure.")
                     return
 
                 if view.denied.is_set():
                     await interaction.followup.send("Head Operator denied the request.", ephemeral=True)
+                    tgt.locked = False
+                    logger.info(f"Instance '{instance}' unlocked automatically by Nexa due to fsaccess command failure.")
                     return
 
         try:
