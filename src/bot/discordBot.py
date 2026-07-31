@@ -16,10 +16,11 @@ from discord import Interaction, TextChannel
 
 from backend.instanceManager import InstanceManager, ServerStatus, ServerInstance
 from bot.cogs.system import SystemCog
-from services.nexaConfig import NexaConfig, NexaInstanceRegistry
+from services.nexaConfig import NexaConfig, NexaInstanceRegistry, NexaCmdConfig
 from services.nexaDB import protectedDB
 from services import nexaLoggerFactory
 from bot.cmdServices.nxbotCmdInstanceEmbeds import InstanceEmbedTracker
+from bot.cmdServices.nxbotGuard import NxbotGuard
 
 from .ui import SimpleMenu, MenuButton, ServerStatusEmbed
 from .cogs.general import GeneralCog
@@ -45,6 +46,7 @@ class NexaBot(commands.Bot):
         *,
         registry: NexaInstanceRegistry | str | None = None,
         config: NexaConfig | str | None = None,
+        cmdConfig: NexaCmdConfig | str | None = None,
         statusChannelID: int | None = None,
         nexaUpdateStatus: int,
         isResurrected: bool = False
@@ -67,6 +69,11 @@ class NexaBot(commands.Bot):
             registry if isinstance(registry, str) else "NexaInstanceRegistry.yaml"
         )
 
+        # Command Config
+        self.cmdConfig = cmdConfig if isinstance(cmdConfig, NexaCmdConfig) else(
+            config if isinstance(cmdConfig, str) else "NexaBotCmdCfg.yaml"
+        )
+
         self.statusChannelID = statusChannelID or self.config.get("discord.statusChannel", None)
         self.healthChannelID = self.config.get("discord.healthIssuesChannelID", None)
         self.updateInterval  = int(self.config.get("general.updateInterval", 10))
@@ -86,6 +93,9 @@ class NexaBot(commands.Bot):
 
         # Instance embed tracker
         self.instanceEmbeds = InstanceEmbedTracker()
+
+        # Guard
+        self.guard = NxbotGuard(self, self.cmdConfig)
 
         self._hydrate_instances()
 
@@ -127,7 +137,7 @@ class NexaBot(commands.Bot):
     
     def _is_head_operator(self, user_id: int) -> bool:
         return (
-            self.config.get("security.headOperator", False)
+            self.config.get("security.headOperator", 0) == user_id
         )
 
     def _has_agreed_to_terms(self, user_id: int) -> bool:

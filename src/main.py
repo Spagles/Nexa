@@ -26,10 +26,11 @@ import argparse
 SELF_PATH = os.path.abspath(sys.argv[0])
 
 # Load Config
-from services.nexaConfig import NexaConfig, NexaInstanceRegistry
+from services.nexaConfig import NexaConfig, NexaInstanceRegistry, NexaCmdConfig
 
 config = NexaConfig("NexaBotConfig.yaml")
 registry = NexaInstanceRegistry("NexaInstanceRegistry.yaml")
+cmdConfig = NexaCmdConfig("NexaBotCmdCfg.yaml")
 
 # Protected DB password, guaranteed present by checkIfAbleToRun()
 db_key = os.environ.get("NEXABOT_PROTECTED_KEY")
@@ -263,7 +264,7 @@ def main():
 
     # Start Discord bot IF enabled in config
     if config.get("discord.enable", False):
-        bot = NexaBot(token=token, instance_manager=manager, registry=registry, config=config, statusChannelID=config.get("discord.statusChannelID", None), nexaUpdateStatus=update_status, isResurrected=args.resurrected)
+        bot = NexaBot(token=token, instance_manager=manager, registry=registry, config=config, cmdConfig=cmdConfig, statusChannelID=config.get("discord.statusChannelID", None), nexaUpdateStatus=update_status, isResurrected=args.resurrected)
         bot.start_bot()
         logger.info("Discord bot started.")
 

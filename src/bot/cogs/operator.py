@@ -7,12 +7,14 @@ import os
 import base64
 import io
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import asyncio
 
 import discord
 from discord.ext import commands
 from discord import app_commands, Interaction
+
+from datetime import datetime, timezone
 
 from services.nexaDB import protectedDB
 from services.nexaConfig import NexaConfig
@@ -25,6 +27,11 @@ from services.nexaAuthenticationService import (
 from services.nexaVerifService import NexaVerifService
 from services.nexaSftpService import NexaSftpService, SESSION_TIMEOUT_SECONDS
 from services import nexaLoggerFactory
+from services.modpackInstaller import ModpackInstaller, InstallStage, STAGE_LABELS
+
+from backend.instanceManager import ServerStatus, ServerInstance
+
+from bot.cmdServices.nxbotGuard import NxbotGuard
 
 from ..cmdServices import nxbotCmdGeneral
 
@@ -37,6 +44,32 @@ logger = nexaLoggerFactory.get_logger("OperatorCog")
 TICKET_LIFETIME_SECONDS = 15 * 60
 _headOperatorTicketExpiresAt: float = 0.0  # 0.0 / any past timestamp = no valid ticket
 
+class InteractionResponder:
+    """
+    Wraps an Interaction so callers don't need to manually track whether an
+    upstream step (_ensureHeadOperatorTicket, _ensureOpHasCorrectPerms)
+    already deferred it. Both of those call interaction.response.defer()
+    the moment they run, which permanently consumes interaction.response for
+    the rest of that interaction's lifetime -- any response.send_message()
+    after that point raises, and any followup.send() before it also raises.
+
+    Create one per interaction, pass it to the auth helpers instead of the
+    raw Interaction, and call responder.send(...) for every response in the
+    command body instead of choosing between interaction.response.send_message
+    and interaction.followup.send by hand.
+    """
+    def __init__(self, interaction: Interaction):
+        self.interaction = interaction
+        self.deferred = False
+
+    async def defer(self, *args, **kwargs):
+        await self.interaction.response.defer(*args, **kwargs)
+        self.deferred = True
+
+    async def send(self, *args, **kwargs):
+        if self.deferred:
+            return await self.interaction.followup.send(*args, **kwargs)
+        return await self.interaction.response.send_message(*args, **kwargs)
 
 def _hasValidTicket() -> bool:
     global _headOperatorTicketExpiresAt
@@ -71,41 +104,28 @@ def _buildAuthService(config: NexaConfig, notificationService: NotificationHelpe
 
 
 
-async def _ensureHeadOperatorTicket(interaction: Interaction, verifService: NexaVerifService) -> bool:
+async def _ensureHeadOperatorTicket(responder: InteractionResponder, verifService: NexaVerifService) -> bool:
     """
-    Called by every /keyman subcommand immediately after the existing check_terms /
-    check_operator / check_head_operator gates, and BEFORE the command does anything
-    else with the interaction. This function always defers the interaction itself
-    (ephemeral), so callers must use interaction.followup.send(...) for their own
-    responses afterward, never interaction.response.send_message(...) - this keeps
-    the response pattern uniform regardless of whether a ticket was already valid
-    or a full verification flow had to run.
+    Called by every /keyman subcommand immediately after guard.evaluate(),
+    and BEFORE the command does anything else with the interaction. Always
+    defers via responder.defer(), so responder.send(...) is safe to call
+    downstream for the rest of the command regardless of whether a ticket
+    was already valid or a full verification flow had to run.
 
-    verifService must be the cog's single, shared NexaVerifService instance (e.g.
-    self.verifService), not a freshly constructed one. Its single-active-session
-    lock only means anything if every caller shares the same instance.
-
-    If a valid ticket is already held, defers and returns True immediately with no
-    further user-visible action. Otherwise, walks the Head Operator through the same
-    web-auth workflow used elsewhere (isHOVerif=True, so it checks the root key
-    specifically, never an operator code).
-
-    Returns False if verification fails, times out, or a session is already active
-    for some other reason; in every False case, this function has already edited the
-    deferred response to explain why, so the caller should simply return.
+    verifService must be the cog's single, shared NexaVerifService instance.
     """
-    await interaction.response.defer(ephemeral=True)
+    await responder.defer(ephemeral=True)
 
     if _hasValidTicket():
         return True
 
     try:
         session = await verifService.beginAuthentication(
-            discordUserID=interaction.user.id,
+            discordUserID=responder.interaction.user.id,
             isHOVerif=True
         )
     except RuntimeError as e:
-        await interaction.followup.send(str(e), ephemeral=True)
+        await responder.send(str(e), ephemeral=True)
         return False
 
     embed = discord.Embed(
@@ -124,14 +144,14 @@ async def _ensureHeadOperatorTicket(interaction: Interaction, verifService: Nexa
     qrBytes = base64.b64decode(session.qrCodeDataUri.split(",", 1)[1])
     qrFile = discord.File(io.BytesIO(qrBytes), filename="qr.png")
 
-    message = await interaction.followup.send(embed=embed, file=qrFile, ephemeral=True, wait=True)
+    message = await responder.send(embed=embed, file=qrFile, ephemeral=True, wait=True)
 
-    logger.info(f"Head Operator ticket verification started by {interaction.user.id}.")
+    logger.info(f"Head Operator ticket verification started by {responder.interaction.user.id}.")
 
     result = await verifService.endSession(session)
 
     if not result.success:
-        logger.warning(f"Head Operator ticket verification failed for {interaction.user.id}: {result.reason}")
+        logger.warning(f"Head Operator ticket verification failed for {responder.interaction.user.id}: {result.reason}")
         failedEmbed = discord.Embed(
             title="Verification Failed",
             description=f"Could not verify your Head Operator credential.\n\n**Reason:** `{result.reason}`\n\n"
@@ -142,7 +162,7 @@ async def _ensureHeadOperatorTicket(interaction: Interaction, verifService: Nexa
         return False
 
     _issueTicket()
-    logger.info(f"Head Operator ticket issued for {interaction.user.id}, valid for "
+    logger.info(f"Head Operator ticket issued for {responder.interaction.user.id}, valid for "
                 f"{TICKET_LIFETIME_SECONDS // 60} minutes.")
 
     confirmedEmbed = discord.Embed(
@@ -155,28 +175,26 @@ async def _ensureHeadOperatorTicket(interaction: Interaction, verifService: Nexa
 
 
 async def _ensureOpHasCorrectPerms(
-    interaction: Interaction,
+    responder: InteractionResponder,
     verifService: NexaVerifService,
     permissions: List[str],
 ) -> bool:
     """
-    Defers the interaction, verifies the caller through the web-auth flow,
-    and returns True only if the verified operator holds every requested permission.
-
-    verifService must be the cog's single, shared NexaVerifService instance (e.g.
-    self.verifService). See _ensureHeadOperatorTicket's docstring for why.
+    Defers via responder.defer(), verifies the caller through the web-auth
+    flow, and returns True only if the verified operator holds every
+    requested permission.
     """
-    await interaction.response.defer(ephemeral=True)
+    await responder.defer(ephemeral=True)
 
     if not permissions:
         return True
 
     try:
         session = await verifService.beginAuthentication(
-            discordUserID=interaction.user.id
+            discordUserID=responder.interaction.user.id
         )
     except RuntimeError as e:
-        await interaction.followup.send(str(e), ephemeral=True)
+        await responder.send(str(e), ephemeral=True)
         return False
 
     embed = discord.Embed(
@@ -195,14 +213,14 @@ async def _ensureOpHasCorrectPerms(
     qrBytes = base64.b64decode(session.qrCodeDataUri.split(",", 1)[1])
     qrFile = discord.File(io.BytesIO(qrBytes), filename="qr.png")
 
-    message = await interaction.followup.send(embed=embed, file=qrFile, ephemeral=True, wait=True)
+    message = await responder.send(embed=embed, file=qrFile, ephemeral=True, wait=True)
 
-    logger.info(f"Operator permission verification started by {interaction.user.id}.")
+    logger.info(f"Operator permission verification started by {responder.interaction.user.id}.")
 
     result = await verifService.endSession(session)
 
     if not result.success:
-        logger.warning(f"Operator permission verification failed for {interaction.user.id}: {result.reason}")
+        logger.warning(f"Operator permission verification failed for {responder.interaction.user.id}: {result.reason}")
         failedEmbed = discord.Embed(
             title="Verification Failed",
             description=(
@@ -216,8 +234,6 @@ async def _ensureOpHasCorrectPerms(
 
     missingPermissions = [p for p in permissions if p not in result.capabilities]
     if missingPermissions:
-        # Kept this in just in case I want to show permissions required in the future
-        # missingDisplay = ", ".join(f"`{p}`" for p in missingPermissions)
         deniedEmbed = discord.Embed(
             title="Insufficient Permissions",
             description=f"Your verified operator key is missing the required permissions for this command.",
@@ -329,21 +345,20 @@ class OperatorCog(commands.Cog):
     @app_commands.choices(capability=[
         app_commands.Choice(name="File System Access", value="fsaccess"),
         app_commands.Choice(name="Modpack Installs", value="modpackInstalls"),
+        app_commands.Choice(name="Instance Lifecycle Management", value="lockAndUnlockInstances"),
+        app_commands.Choice(name="Remote Console", value="executeRCON"),
     ])
     async def issue(self, interaction: Interaction, discord_user: discord.User, capability: app_commands.Choice[str]):
-        if not await self.bot.check_terms(interaction):
-            return
-        if not await self.bot.check_operator(interaction):
-            return
-        if not await self.bot.check_head_operator(interaction):
+        if not await self.bot.guard.evaluate(interaction, "keyman"):
             return
 
-
-        if not await _ensureHeadOperatorTicket(interaction, self.verifService):
-            return
+        responder = InteractionResponder(interaction)
+        if self.bot.cmdConfig.get("commands.keyman.issue.requireAuthentication", True):
+            if not await _ensureHeadOperatorTicket(responder, self.verifService):
+                return
 
         if not self.bot._is_server_operator(discord_user.id):
-            await interaction.followup.send(
+            await responder.send(
                 f"{discord_user.mention} is not a Server Operator. Operator keys can only be "
                 f"issued to users listed under `security.serverOperators`. Add them there first "
                 f"if this was intentional.",
@@ -357,7 +372,7 @@ class OperatorCog(commands.Cog):
                 capabilities=[capability.value]
             )
         except OperatorKeyAlreadyExistsError:
-            await interaction.followup.send(
+            await responder.send(
                 f"{discord_user.mention} already has an active operator key. "
                 f"Use `/keyman modify` to change their capabilities, `/keyman rotate` to reissue "
                 f"their code, or `/keyman revoke` first if you want to start over.",
@@ -365,13 +380,13 @@ class OperatorCog(commands.Cog):
             )
             return
         except InvalidCapabilityError as e:
-            await interaction.followup.send(str(e), ephemeral=True)
+            await responder.send(str(e), ephemeral=True)
             return
 
         logger.info(f"Operator key issued to Discord user {discord_user.id} "
                     f"by Head Operator {interaction.user.id}. Capability: {capability.value}")
 
-        await interaction.followup.send(
+        await responder.send(
             f"Key issued for {discord_user.mention} with capability `{capability.value}`.\n\n"
             f"**Code:** `{code}`\n\n"
             f"This code is shown only once and is not stored anywhere in plaintext. "
@@ -391,6 +406,8 @@ class OperatorCog(commands.Cog):
         capability=[
             app_commands.Choice(name="File System Access", value="fsaccess"),
             app_commands.Choice(name="Modpack Installs", value="modpackInstalls"),
+            app_commands.Choice(name="Instance Lifecycle Management", value="lockAndUnlockInstances"),
+            app_commands.Choice(name="Remote Console", value="executeRCON"),
         ],
         action=[
             app_commands.Choice(name="Add", value="add"),
@@ -404,15 +421,13 @@ class OperatorCog(commands.Cog):
         capability: app_commands.Choice[str],
         action: app_commands.Choice[str]
     ):
-        if not await self.bot.check_terms(interaction):
-            return
-        if not await self.bot.check_operator(interaction):
-            return
-        if not await self.bot.check_head_operator(interaction):
+        if not await self.bot.guard.evaluate(interaction, "keyman"):
             return
 
-        if not await _ensureHeadOperatorTicket(interaction, self.verifService):
-            return
+        responder = InteractionResponder(interaction)
+        if self.bot.cmdConfig.get("commands.keyman.modify.requireAuthentication", True):
+            if not await _ensureHeadOperatorTicket(responder, self.verifService):
+                return
 
         if not self.bot._is_server_operator(discord_user.id):
             logger.warning(f"{discord_user.id} holds an operator key but is no longer listed as a "
@@ -425,21 +440,21 @@ class OperatorCog(commands.Cog):
                 action=action.value
             )
         except OperatorKeyNotFoundError:
-            await interaction.followup.send(
+            await responder.send(
                 f"{discord_user.mention} does not have an active operator key. "
                 f"Use `/keyman issue` first.",
                 ephemeral=True
             )
             return
         except InvalidCapabilityError as e:
-            await interaction.followup.send(str(e), ephemeral=True)
+            await responder.send(str(e), ephemeral=True)
             return
 
         logger.info(f"Operator key for Discord user {discord_user.id} modified "
                     f"by Head Operator {interaction.user.id}: {action.value} {capability.value}")
 
         capabilitiesDisplay = ", ".join(f"`{c}`" for c in updatedCapabilities) if updatedCapabilities else "*(none)*"
-        await interaction.followup.send(
+        await responder.send(
             f"Updated capabilities for {discord_user.mention}: {capabilitiesDisplay}",
             ephemeral=True
         )
@@ -447,20 +462,18 @@ class OperatorCog(commands.Cog):
     @keyman_group.command(name="revoke", description="Revoke an operator's key entirely.")
     @app_commands.describe(discord_user="The Server Operator whose key you're revoking.")
     async def revoke(self, interaction: Interaction, discord_user: discord.User):
-        if not await self.bot.check_terms(interaction):
-            return
-        if not await self.bot.check_operator(interaction):
-            return
-        if not await self.bot.check_head_operator(interaction):
+        if not await self.bot.guard.evaluate(interaction, "keyman"):
             return
 
-        if not await _ensureHeadOperatorTicket(interaction, self.verifService):
-            return
+        responder = InteractionResponder(interaction)
+        if self.bot.cmdConfig.get("commands.keyman.revoke.requireAuthentication", True):
+            if not await _ensureHeadOperatorTicket(responder, self.verifService):
+                return
 
         try:
             self.authService.revokeOperatorKey(discordUserID=discord_user.id)
         except OperatorKeyNotFoundError:
-            await interaction.followup.send(
+            await responder.send(
                 f"{discord_user.mention} does not have an active operator key to revoke.",
                 ephemeral=True
             )
@@ -469,8 +482,6 @@ class OperatorCog(commands.Cog):
         logger.info(f"Operator key for Discord user {discord_user.id} revoked "
                     f"by Head Operator {interaction.user.id}.")
 
-        # Works as a hook to detect key revocation that invalidates any current
-        # operation for safety.
         wasStopped = await nxbotCmdGeneral.emergencyStop(discord_user.id)
         if wasStopped:
             logger.warning(f"Revocation of Discord user {discord_user.id}'s key also "
@@ -481,7 +492,7 @@ class OperatorCog(commands.Cog):
             "\n\nThey also had an active session in progress, which has been immediately terminated."
             if wasStopped else ""
         )
-        await interaction.followup.send(
+        await responder.send(
             f"Revoked the operator key for {discord_user.mention}.{stoppedNote}",
             ephemeral=True
         )
@@ -489,18 +500,16 @@ class OperatorCog(commands.Cog):
     @keyman_group.command(name="rotate", description="Revoke and reissue an operator's key, carrying over their capabilities.")
     @app_commands.describe(discord_user="The Server Operator whose key you're rotating.")
     async def rotate(self, interaction: Interaction, discord_user: discord.User):
-        if not await self.bot.check_terms(interaction):
-            return
-        if not await self.bot.check_operator(interaction):
-            return
-        if not await self.bot.check_head_operator(interaction):
+        if not await self.bot.guard.evaluate(interaction, "keyman"):
             return
 
-        if not await _ensureHeadOperatorTicket(interaction, self.verifService):
-            return
+        responder = InteractionResponder(interaction)
+        if self.bot.cmdConfig.get("commands.keyman.rotate.requireAuthentication", True):
+            if not await _ensureHeadOperatorTicket(responder, self.verifService):
+                return
 
         if not self.bot._is_server_operator(discord_user.id):
-            await interaction.followup.send(
+            await responder.send(
                 f"{discord_user.mention} is not a Server Operator. If they no longer should have "
                 f"access, use `/keyman revoke` instead. If this is unexpected, confirm they're "
                 f"listed under `security.serverOperators`.",
@@ -511,7 +520,7 @@ class OperatorCog(commands.Cog):
         try:
             newCode = self.authService.rotateOperatorKey(discordUserID=discord_user.id)
         except OperatorKeyNotFoundError:
-            await interaction.followup.send(
+            await responder.send(
                 f"{discord_user.mention} does not have an active operator key to rotate.",
                 ephemeral=True
             )
@@ -520,7 +529,7 @@ class OperatorCog(commands.Cog):
         logger.info(f"Operator key for Discord user {discord_user.id} rotated "
                     f"by Head Operator {interaction.user.id}.")
 
-        await interaction.followup.send(
+        await responder.send(
             f"Key rotated for {discord_user.mention}. Their previous code is no longer valid.\n\n"
             f"**New Code:** `{newCode}`\n\n"
             f"This code is shown only once and is not stored anywhere in plaintext. "
@@ -532,15 +541,13 @@ class OperatorCog(commands.Cog):
     @keyman_group.command(name="list", description="List active operator keys and their capabilities.")
     @app_commands.describe(discord_user="Optional: filter to a specific Server Operator.")
     async def list_keys(self, interaction: Interaction, discord_user: discord.User = None):
-        if not await self.bot.check_terms(interaction):
-            return
-        if not await self.bot.check_operator(interaction):
-            return
-        if not await self.bot.check_head_operator(interaction):
+        if not await self.bot.guard.evaluate(interaction, "keyman"):
             return
 
-        if not await _ensureHeadOperatorTicket(interaction, self.verifService):
-            return
+        responder = InteractionResponder(interaction)
+        if self.bot.cmdConfig.get("commands.keyman.list.requireAuthentication", True):
+            if not await _ensureHeadOperatorTicket(responder, self.verifService):
+                return
 
         targetID = discord_user.id if discord_user else None
         entries = self.authService.listOperatorKeys(discordUserID=targetID)
@@ -551,7 +558,7 @@ class OperatorCog(commands.Cog):
                 if discord_user else
                 "There are no active operator keys."
             )
-            await interaction.followup.send(message, ephemeral=True)
+            await responder.send(message, ephemeral=True)
             return
 
         menu = SimpleMenu(interaction.user)
@@ -577,40 +584,39 @@ class OperatorCog(commands.Cog):
                 description="\n".join(lines)
             )
 
-        # already_deferred=True: _ensureHeadOperatorTicket() above always defers this
-        # interaction before this point, so SimpleMenu must use followup.send() rather
-        # than response.send_message() here.
-        await menu.send(interaction, already_deferred=True)
+        # already_deferred now reflects reality instead of being hardcoded --
+        # if requireAuthentication was false, this interaction was never
+        # deferred, and SimpleMenu needs to know that to respond correctly.
+        await menu.send(interaction, already_deferred=responder.deferred)
 
 
     # Filesystem Access Command
-    @app_commands.command(name="fsaccess", description="[OPS] Grants Filesystem Access to an instance")
+    @app_commands.command(name="fsaccess", description="Grants Filesystem Access to an instance")
     @app_commands.describe(instance="The instance to open filesystem access to.")
     @app_commands.autocomplete(instance=_instance_autocomplete)
     async def filesystem_access(self, interaction: Interaction, instance: str | None = None):
-        if not await self.bot.check_terms(interaction):
-            return
-        if not await self.bot.check_operator(interaction):
+        if not await self.bot.guard.evaluate(interaction, "fsaccess"):
             return
 
-        # This pipes into the Nexa Authentication step
-        if not await _ensureOpHasCorrectPerms(interaction, self.verifService, ["fsaccess"]):
-            return
+        responder = InteractionResponder(interaction)
+        if self.bot.cmdConfig.get("commands.fsaccess.requireAuthentication", True):
+            if not await _ensureOpHasCorrectPerms(responder, self.verifService, ["fsaccess"]):
+                return
 
         try:
             jail_root = _resolve_instance_folder(self.bot, instance)
         except ValueError as exc:
             logger.error(f"An error occured while setting up the SFTP Connection: {str(exc)}")
-            await interaction.followup.send("An error occurred.", ephemeral=True)
+            await responder.send("An error occurred.", ephemeral=True)
             return
 
-        require_approval = self.bot.config.get("security.requireHeadOperatorApprovalForHighLevelOperation", True)
+        require_approval = self.bot.cmdConfig.get("commands.fsaccess.askHeadOperatorForApproval", True)
         if require_approval:
             head_operator_id = self.bot.config.get("security.headOperator", 0)
             if head_operator_id:
                 head_user = await self.bot.fetch_user(head_operator_id)
                 if head_user is None:
-                    await interaction.followup.send("The configured Head Operator could not be resolved.", ephemeral=True)
+                    await responder.send("The configured Head Operator could not be resolved.", ephemeral=True)
                     return
 
                 APPROVAL_TIMEOUT_SECONDS = 300  # 5 mins
@@ -621,13 +627,13 @@ class OperatorCog(commands.Cog):
                     view=view,
                 )
 
-                await interaction.followup.send(
+                await responder.send(
                     embed=discord.Embed(
                         title="Awaiting Head Operator Approval",
                         description=(
                             "Your filesystem access request is currently being presented "
                             "to the Head Operator for approval. This page will not update "
-                            "automatically - you'll receive a new message once a decision "
+                            "automatically. You'll receive a new message once a decision "
                             "is made."
                         ),
                         color=discord.Color.blurple()
@@ -635,7 +641,6 @@ class OperatorCog(commands.Cog):
                     ephemeral=True
                 )
 
-                # Wait on BOTH approved and denied together, not just approved.
                 approvedTask = asyncio.create_task(view.approved.wait())
                 deniedTask = asyncio.create_task(view.denied.wait())
                 try:
@@ -694,6 +699,281 @@ class OperatorCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="install_mpck",
+        description="Install a .mrpack modpack to an instance."
+    )
+    @app_commands.describe(
+        url="Direct URL to the .mrpack file.",
+        instance="The instance to install the modpack to."
+    )
+    @app_commands.autocomplete(instance=_instance_autocomplete)
+    async def install_mpck(self, interaction: Interaction, url: str, instance: str):
+        if not await self.bot.guard.evaluate(interaction, "install_mcpk"):
+            return
+
+        responder = InteractionResponder(interaction)
+        if self.bot.cmdConfig.get("commands.install_mcpk.requireAuthentication", True):
+            if not await _ensureOpHasCorrectPerms(responder, self.verifService, ["modpackInstalls"]):
+                return
+
+        tgt = self.bot.instance_manager.get_instance(instance)
+        if not tgt:
+            await responder.send(f"❌ Instance `{instance}` not found.", ephemeral=True)
+            return
+        if getattr(tgt, "locked", False):
+            await responder.send(f"❌ Instance `{instance}` is already locked.", ephemeral=True)
+            return
+
+        def _build_embed(stage_label: str, detail: str = "", failed: bool = False, cancellable: bool = False) -> discord.Embed:
+            color = 0xED4245 if failed else (0xFEE75C if not stage_label.startswith("🎉") else 0x57F287)
+            embed = discord.Embed(
+                title=f"Installing Modpack to {instance}",
+                description=f"**{stage_label}**\n{detail}".strip(),
+                color=color,
+                timestamp=datetime.now(timezone.utc)
+            )
+            if cancellable:
+                embed.set_footer(text="React with the Cancel button to abort the scheduled shutdown.")
+            else:
+                embed.set_footer(text="Nexa • Modpack Installer")
+            return embed
+
+        channel = self.bot.get_channel(self.bot.statusChannelID) if self.bot.statusChannelID else None
+        install_msg: Optional[discord.Message] = None
+
+        await responder.send(f"🚀 Starting modpack installation for `{instance}`…", ephemeral=True)
+
+        if channel:
+            install_msg = await channel.send(
+                embed=_build_embed(STAGE_LABELS[InstallStage.DOWNLOADING_MRPACK])
+            )
+
+        shutdown_cancelled = False
+
+        async def handle_players():
+            nonlocal shutdown_cancelled
+
+            await tgt.refresh_players()
+            if tgt.players > 0 and tgt.status == ServerStatus.ONLINE:
+                await self.bot.instance_manager.schedule_shutdown(
+                    instance,
+                    delay_seconds=self.bot.cmdConfig.get("commands.install_mcpk.shutdownWaitPeriodInMins", 15) * 60,
+                    reason="Modpack installation scheduled by operator.",
+                    hard=True
+                )
+
+                if install_msg:
+                    cancel_view = discord.ui.View(timeout=15 * 60)
+                    cancel_btn = discord.ui.Button(
+                        label="Cancel Shutdown",
+                        style=discord.ButtonStyle.danger,
+                        emoji="🛑"
+                    )
+
+                    async def on_cancel(btn_interaction: Interaction):
+                        # This is a separate, fresh interaction from the
+                        # button click -- not the original command interaction
+                        # -- so it correctly uses response.send_message()
+                        # directly rather than going through responder.
+                        nonlocal shutdown_cancelled
+                        if not self.bot._is_superuser(btn_interaction.user.id):
+                            await btn_interaction.response.send_message(
+                                "Only superusers can cancel this.", ephemeral=True
+                            )
+                            return
+                        shutdown_cancelled = True
+                        self.bot.instance_manager.cancel_shutdown(instance)
+                        await btn_interaction.response.send_message(
+                            "✅ Shutdown cancelled. Install aborted.", ephemeral=True
+                        )
+                        await install_msg.edit(
+                            embed=_build_embed("🛑 Install cancelled by operator.", failed=True),
+                            view=None
+                        )
+
+                    cancel_btn.callback = on_cancel
+                    cancel_view.add_item(cancel_btn)
+
+                    await install_msg.edit(
+                        embed=_build_embed(
+                            STAGE_LABELS[InstallStage.WAITING_FOR_SHUTDOWN],
+                            f"{tgt.players} player(s) online. Server shutting down in {self.bot.cmdConfig.get('commands.install_mcpk.shutdownWaitPeriodInMins', 15)} minute(s).",
+                            cancellable=True
+                        ),
+                        view=cancel_view
+                    )
+
+                while tgt.status != ServerStatus.OFFLINE:
+                    if shutdown_cancelled:
+                        return False
+                    await asyncio.sleep(2)
+
+                if install_msg:
+                    await install_msg.edit(view=None)
+
+            elif tgt.status in (ServerStatus.ONLINE,):
+                await self.bot.instance_manager.stop_instance(instance, hard=True)
+                while tgt.status != ServerStatus.OFFLINE:
+                    await asyncio.sleep(2)
+
+            return True
+
+        async def on_status(status):
+            if install_msg:
+                label = STAGE_LABELS.get(status.stage, status.stage.name)
+                await install_msg.edit(
+                    embed=_build_embed(label, status.detail, failed=status.failed),
+                    view=None
+                )
+
+        async def _run_install():
+            nonlocal shutdown_cancelled
+
+            proceed = await handle_players()
+            if not proceed or shutdown_cancelled:
+                return
+
+            installer = ModpackInstaller(
+                url=url,
+                instance_name=instance,
+                instance_manager=self.bot.instance_manager,
+                registry=self.bot.registry,
+                on_status=on_status,
+            )
+
+            result = await installer.run()
+
+            try:
+                if result.success:
+                    await interaction.user.send(
+                        f"✅ Modpack installation for `{instance}` completed successfully."
+                    )
+                else:
+                    await interaction.user.send(
+                        f"❌ Modpack installation for `{instance}` failed:\n{result.message}"
+                    )
+            except discord.Forbidden:
+                pass  # User has DMs closed
+
+            if install_msg:
+                await asyncio.sleep(180)
+                try:
+                    await install_msg.delete()
+                except Exception:
+                    pass
+
+        asyncio.create_task(_run_install())
+
+    @app_commands.command(name="execute", description="Execute a raw RCON command on an instance.")
+    @app_commands.describe(instance="The instance to run the command on.", command="The RCON command to execute.")
+    @app_commands.autocomplete(instance=_instance_autocomplete)
+    async def execute(self, interaction: Interaction, instance: str, command: str):
+        if not await self.bot.guard.evaluate(interaction, "execute"):
+            return
+
+        responder = InteractionResponder(interaction)
+        if self.bot.cmdConfig.get("commands.execute.requireAuthentication", True):
+            if not await _ensureOpHasCorrectPerms(responder, self.verifService, ["executeRCON"]):
+                return
+
+        tgt = self.bot.instance_manager.get_instance(instance)
+        if not tgt:
+            await responder.send(f"Instance `{instance}` not found.", ephemeral=True)
+            return
+
+        cleanedCmd = command.lstrip("/")
+        protected_cmds = tgt.get_protected_commands() or []
+        if cleanedCmd.split()[0] in protected_cmds:
+            await responder.send(
+                f"Command `{cleanedCmd.split()[0]}` is protected and cannot be executed through this interface.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, tgt.executeCommand, command)
+            embed = discord.Embed(
+                title=f"RCON Response: {tgt.name}",
+                description=f"**Command:** `{command}`\n**Response:**\n```{response}```",
+                color=0x5865F2
+            )
+            await responder.send(embed=embed, ephemeral=True)
+        except RuntimeError as e:
+            await responder.send(f"Error: {e}", ephemeral=True)
+
+    @app_commands.command(name="lock_instance", description="Prevent an instance from being started.")
+    @app_commands.describe(instance="The instance to lock.")
+    @app_commands.autocomplete(instance=_instance_autocomplete)
+    async def lock_instance(self, interaction: Interaction, instance: str):
+        if not await self.bot.guard.evaluate(interaction, "lock_instance"):
+            return
+
+        responder = InteractionResponder(interaction)
+        if self.bot.cmdConfig.get("commands.lock_instance.requireAuthentication", True):
+            if not await _ensureOpHasCorrectPerms(responder, self.verifService, ["lockAndUnlockInstances"]):
+                return
+
+        tgt = self.bot.instance_manager.get_instance(instance)
+        if not tgt:
+            await responder.send(f"Instance `{instance}` not found.", ephemeral=True)
+            return
+        if tgt.status in (ServerStatus.ONLINE, ServerStatus.STARTING):
+            await responder.send(
+                f"`{instance}` is currently {tgt.status.value} and cannot be locked. Ensure the instance is offline before locking.",
+                ephemeral=True
+            )
+            return
+        if getattr(tgt, "locked", False):
+            await responder.send(f"`{instance}` is already locked.", ephemeral=True)
+            return
+
+        tgt.locked = True
+        logger.info(f"Instance '{instance}' locked by {interaction.user} ({interaction.user.id}).")
+        await responder.send(f"`{instance}` is now locked. It cannot be started until unlocked.", ephemeral=True)
+
+    @app_commands.command(name="unlock_instance", description="Allow a locked instance to be started again.")
+    @app_commands.describe(instance="The instance to unlock.")
+    @app_commands.autocomplete(instance=_instance_autocomplete)
+    async def unlock_instance(self, interaction: Interaction, instance: str):
+        if not await self.bot.guard.evaluate(interaction, "unlock_instance"):
+            return
+
+        responder = InteractionResponder(interaction)
+        if self.bot.cmdConfig.get("commands.unlock_instance.requireAuthentication", True):
+            if not await _ensureOpHasCorrectPerms(responder, self.verifService, ["lockAndUnlockInstances"]):
+                return
+
+        tgt = self.bot.instance_manager.get_instance(instance)
+        if not tgt:
+            await responder.send(f"Instance `{instance}` not found.", ephemeral=True)
+            return
+        if not getattr(tgt, "locked", False):
+            await responder.send(f"`{instance}` is not locked.", ephemeral=True)
+            return
+
+        tgt.locked = False
+        logger.info(f"Instance '{instance}' unlocked by {interaction.user} ({interaction.user.id}).")
+        await responder.send(f"`{instance}` is now unlocked.", ephemeral=True)
+
+    @app_commands.command(name="force_stop", description="Force stop an instance immediately.")
+    @app_commands.describe(instance="The instance to force stop.")
+    @app_commands.autocomplete(instance=_instance_autocomplete)
+    async def force_stop(self, interaction: Interaction, instance: str):
+        if not await self.bot.guard.evaluate(interaction, "force_stop"):
+            return
+
+        tgt = self.bot.instance_manager.get_instance(instance)
+        if not tgt:
+            await interaction.response.send_message(f"Instance `{instance}` not found.", ephemeral=True)
+            return
+        if tgt.status in (ServerStatus.OFFLINE):
+            await interaction.response.send_message(f"`{instance}` is already {tgt.status.value}.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(f"Force stopping `{tgt.name}`.", ephemeral=True)
+        asyncio.create_task(self.bot.instance_manager.stop_instance(tgt.name, hard=True))
 
 class NotificationHelper:
     def __init__(self, bot: "NexaBot"): #type: ignore

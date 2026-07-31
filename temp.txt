@@ -1,0 +1,429 @@
+import sys
+import logging
+from pathlib import Path
+from enum import IntEnum
+from typing import Any, Dict, Optional, Set
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+
+class PermissionLevel(IntEnum):
+    EVERYONE = 0
+    SUPERUSER = 1
+    OPERATOR = 2
+    HEAD_OPERATOR = 3
+
+    @classmethod
+    def from_str(cls, value: str, *, context: str = "") -> "PermissionLevel":
+        try:
+            return cls[_to_enum_name(value)]
+        except KeyError:
+            valid = ", ".join(m.name.lower() for m in cls)
+            raise ValueError(
+                f"Invalid permissionLevel '{value}'{f' for {context}' if context else ''}. "
+                f"Must be one of: {valid}"
+            )
+
+
+def _to_enum_name(value: str) -> str:
+    # "headOperator" / "head_operator" / "HEAD_OPERATOR" -> "HEAD_OPERATOR"
+    out = []
+    for ch in value:
+        if ch.isupper() and out and out[-1] != "_":
+            out.append("_")
+        out.append(ch.upper())
+    return "".join(out).replace("__", "_")
+
+
+class NexaCmdConfig:
+    """
+    Loads and validates NexaBotCmdCfg.yaml, the per-command configuration
+    for Nexa's Discord command surface (enable/disable, permission tiers,
+    authentication requirements, and command-specific options).
+
+    Follows the same load/merge-defaults/validate/save pattern as NexaConfig.
+    """
+
+    # Commands that are load-bearing for bot operation and cannot be disabled.
+    # These intentionally omit "enabled" from DEFAULT_CONFIG; its presence at
+    # all in the loaded file is treated as a configuration error.
+    CORE_COMMANDS: Set[str] = {
+        "start",
+        "start_specific",
+        "stop",
+        "stop_specific",
+    }
+
+    # Per-command restrictions on which permission levels are valid.
+    # Commands not listed here allow any PermissionLevel.
+    ALLOWED_PERMISSION_LEVELS: Dict[str, Set[PermissionLevel]] = {
+        "fsaccess": {PermissionLevel.OPERATOR, PermissionLevel.HEAD_OPERATOR},
+        "keyman": {PermissionLevel.HEAD_OPERATOR},
+    }
+
+    # Expected types per field, mirroring DEFAULT_CONFIG's shape. A nested dict
+    # means "recurse into this sub-section"; a plain type/tuple means "this
+    # leaf must be an instance of this type". "enabled" is intentionally
+    # omitted from core commands here, matching its omission from
+    # DEFAULT_CONFIG -- see _validate for how that's enforced separately.
+    EXPECTED_TYPES: Dict[str, Any] = {
+        "status": {
+            "enabled": bool,
+            "permissionLevel": str,
+        },
+        "start": {
+            "permissionLevel": str,
+        },
+        "start_specific": {
+            "permissionLevel": str,
+        },
+        "stop": {
+            "permissionLevel": str,
+        },
+        "stop_specific": {
+            "permissionLevel": str,
+        },
+        "execute": {
+            "enabled": bool,
+            "permissionLevel": str,
+            "requireAuthentication": bool,
+        },
+        "lock_instance": {
+            "enabled": bool,
+            "permissionLevel": str,
+            "requireAuthentication": bool,
+        },
+        "unlock_instance": {
+            "enabled": bool,
+            "permissionLevel": str,
+            "requireAuthentication": bool,
+        },
+        "force_stop": {
+            "enabled": bool,
+            "permissionLevel": str,
+        },
+        "install_mcpk": {
+            "enabled": bool,
+            "permissionLevel": str,
+            "requireAuthentication": bool,
+            "shutdownWaitPeriodInMins": int,
+            "strictModVerification": bool,
+        },
+        "keyman": {
+            "enabled": bool,
+            "permissionLevel": str,
+            "issue": {
+                "requireAuthentication": bool,
+            },
+            "modify": {
+                "requireAuthentication": bool,
+            },
+            "revoke": {
+                "requireAuthentication": bool,
+            },
+            "rotate": {
+                "requireAuthentication": bool,
+            },
+            "list": {
+                "requireAuthentication": bool,
+            },
+        },
+        "fsaccess": {
+            "enabled": bool,
+            "permissionLevel": str,
+            "requireAuthentication": bool,
+            "notifyHeadOperatorWhenCommandRun": bool,
+            "approvedAccessTimeWindowInMins": int,
+        },
+        "check_updates": {
+            "enabled": bool,
+            "permissionLevel": str,
+        },
+    }
+
+    DEFAULT_CONFIG: Dict[str, Any] = {
+        "commands": {
+            "status": {
+                "enabled": True,
+                "permissionLevel": "everyone",
+            },
+            "start": {
+                "permissionLevel": "everyone",
+            },
+            "start_specific": {
+                "permissionLevel": "everyone",
+            },
+            "stop": {
+                "permissionLevel": "superuser",
+            },
+            "stop_specific": {
+                "permissionLevel": "superuser",
+            },
+            "execute": {
+                "enabled": True,
+                "permissionLevel": "operator",
+                "requireAuthentication": True,
+            },
+            "lock_instance": {
+                "enabled": True,
+                "permissionLevel": "operator",
+                "requireAuthentication": False,
+            },
+            "unlock_instance": {
+                "enabled": True,
+                "permissionLevel": "operator",
+                "requireAuthentication": False,
+            },
+            "force_stop": {
+                "enabled": True,
+                "permissionLevel": "operator",
+            },
+            "install_mcpk": {
+                "enabled": True,
+                "permissionLevel": "operator",
+                "requireAuthentication": True,
+                "shutdownWaitPeriodInMins": 15,
+                "strictModVerification": True,
+            },
+            "keyman": {
+                "enabled": True,
+                "permissionLevel": "headOperator",
+                "issue": {
+                    "requireAuthentication": True,
+                },
+                "modify": {
+                    "requireAuthentication": True,
+                },
+                "revoke": {
+                    "requireAuthentication": False,
+                },
+                "rotate": {
+                    "requireAuthentication": True,
+                },
+                "list": {
+                    "requireAuthentication": True,
+                },
+            },
+            "fsaccess": {
+                "enabled": True,
+                "permissionLevel": "operator",
+                "requireAuthentication": True,
+                "notifyHeadOperatorWhenCommandRun": True,
+                "approvedAccessTimeWindowInMins": 15,
+            },
+            "check_updates": {
+                "enabled": True,
+                "permissionLevel": "superuser",
+            },
+        }
+    }
+
+    def __init__(self, intendedPath: str, createIfMissing: bool = True):
+        self.configPath = Path(intendedPath)
+
+        if not self.configPath.exists():
+            if createIfMissing:
+                self._createDefaultConfig()
+            else:
+                raise FileNotFoundError(
+                    f"Config file not found at {self.configPath} and createIfMissing is False."
+                )
+
+        self._config: Dict[str, Any] = {}
+        self._load()
+
+    # Private Methods
+    def _createDefaultConfig(self):
+        self.configPath.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.configPath, "w", encoding="utf-8") as f:
+            yaml.safe_dump(self.DEFAULT_CONFIG, f, sort_keys=False)
+
+    def _load(self):
+        with open(self.configPath, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        # Validate the raw, as-written file BEFORE merging defaults. The merge
+        # step strips keys that aren't present in DEFAULT_CONFIG (e.g. a core
+        # command entry has no 'enabled' key by design) -- if we validated
+        # after merging, an operator-added 'enabled: false' on a core command
+        # would be silently deleted before we ever got a chance to catch it.
+        self._validate(data)
+
+        changed = self._mergeDefaults(data, self.DEFAULT_CONFIG)
+
+        # Cache parsed PermissionLevel enums AFTER merging, not during
+        # _validate. Any "_"-prefixed key set on the pre-merge dict would be
+        # silently deleted by _mergeDefaults' unknown-key pruning pass, since
+        # cache keys are never present in DEFAULT_CONFIG.
+        self._cachePermissionLevels(data.get("commands", {}))
+
+        self._config = data
+
+        if changed:
+            self.save()
+
+    def _cachePermissionLevels(self, commands: Dict[str, Any]):
+        for name, entry in commands.items():
+            if isinstance(entry, dict) and "permissionLevel" in entry:
+                entry["_permissionLevelEnum"] = PermissionLevel.from_str(entry["permissionLevel"])
+
+    def _mergeDefaults(self, data: Dict[str, Any], defaults: Dict[str, Any]) -> bool:
+        changed = False
+
+        for key, value in defaults.items():
+            if key not in data:
+                data[key] = value
+                changed = True
+            elif isinstance(value, dict):
+                if not isinstance(data[key], dict):
+                    raise TypeError(f"Section '{key}' must be a dictionary.")
+                if self._mergeDefaults(data[key], value):
+                    changed = True
+
+        for key in list(data.keys()):
+            if key not in defaults:
+                del data[key]
+                changed = True
+
+        return changed
+
+    def _validate(self, data: Dict[str, Any]):
+        if "commands" not in data or not isinstance(data["commands"], dict):
+            self._fatal("Missing or invalid top-level 'commands' section.")
+
+        commands = data["commands"]
+
+        for name, entry in commands.items():
+            if not isinstance(entry, dict):
+                self._fatal(f"Command entry '{name}' must be a mapping.")
+
+            # Semantic checks specific to command config, not expressible as
+            # a plain type comparison.
+            self._validateCoreCommandRule(name, entry)
+            self._validatePermissionLevel(name, entry)
+
+            # Full type-tree walk against EXPECTED_TYPES, same pattern as
+            # NexaInstanceConfig._validate. Only fields present in a given
+            # command's EXPECTED_TYPES entry are checked; fields entirely
+            # absent from EXPECTED_TYPES (there are none currently, but this
+            # keeps behavior sane if a command-specific field is added to
+            # DEFAULT_CONFIG without a matching EXPECTED_TYPES entry) are
+            # skipped rather than treated as a validation failure -- new
+            # fields should always ship with an EXPECTED_TYPES entry, but a
+            # missing one shouldn't crash validation entirely.
+            expected = self.EXPECTED_TYPES.get(name)
+            if expected is not None:
+                self._validateTypes(entry, expected, path=name)
+
+    def _validateTypes(self, data: Dict[str, Any], expected: Dict[str, Any], path: str):
+        for key, expectedType in expected.items():
+            fullPath = f"{path}.{key}"
+
+            if key not in data:
+                # "enabled" is deliberately absent from core commands and is
+                # handled by _validateCoreCommandRule, not here. Any other
+                # missing key is a real gap -- DEFAULT_CONFIG will supply it
+                # on merge, but that only happens after validation, so a file
+                # missing a required key still round-trips correctly; we
+                # don't fail here to allow partial hand-edited files to load
+                # and get healed by _mergeDefaults.
+                continue
+
+            if isinstance(expectedType, dict):
+                if not isinstance(data[key], dict):
+                    self._fatal(f"'{fullPath}' must be a mapping.")
+                self._validateTypes(data[key], expectedType, fullPath)
+            else:
+                if not isinstance(data[key], expectedType):
+                    self._fatal(
+                        f"Invalid type for '{fullPath}'. "
+                        f"Expected {expectedType}, got {type(data[key]).__name__}."
+                    )
+
+    def _validateCoreCommandRule(self, name: str, entry: Dict[str, Any]):
+        if name in self.CORE_COMMANDS and "enabled" in entry:
+            self._fatal(
+                f"'{name}' is a core command and cannot define 'enabled' "
+                f"(core commands are always enabled; Nexa will not function "
+                f"correctly if disabled). See the handbook/wiki for details."
+            )
+
+    def _validatePermissionLevel(self, name: str, entry: Dict[str, Any]):
+        if "permissionLevel" not in entry:
+            return
+
+        raw = entry["permissionLevel"]
+        if not isinstance(raw, str):
+            self._fatal(f"'{name}.permissionLevel' must be a string.")
+
+        try:
+            level = PermissionLevel.from_str(raw, context=f"command '{name}'")
+        except ValueError as e:
+            self._fatal(str(e))
+            return  # unreachable; _fatal calls sys.exit(1)
+
+        allowed = self.ALLOWED_PERMISSION_LEVELS.get(name)
+        if allowed is not None and level not in allowed:
+            allowedNames = ", ".join(sorted(l.name.lower() for l in allowed))
+            self._fatal(
+                f"permissionLevel '{raw}' is not allowed for '{name}'. "
+                f"Allowed levels: {allowedNames}."
+            )
+
+    def _fatal(self, message: str):
+        logger.error(f"[NexaCmdConfig] Invalid configuration: {message}")
+        sys.exit(1)
+
+    # Public Methods
+    def save(self):
+        # Strip derived/internal keys before persisting.
+        cleaned = self._stripInternal(self._config)
+        with open(self.configPath, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cleaned, f, sort_keys=False)
+
+    def _stripInternal(self, data: Any) -> Any:
+        if isinstance(data, dict):
+            return {
+                k: self._stripInternal(v)
+                for k, v in data.items()
+                if not k.startswith("_")
+            }
+        return data
+
+    def reload(self):
+        self._load()
+
+    def isEnabled(self, command: str) -> bool:
+        entry = self._config.get("commands", {}).get(command, {})
+        if command in self.CORE_COMMANDS:
+            return True
+        return bool(entry.get("enabled", False))
+
+    def getPermissionLevel(self, command: str) -> Optional[PermissionLevel]:
+        entry = self._config.get("commands", {}).get(command, {})
+        return entry.get("_permissionLevelEnum")
+
+    def requiresAuthentication(self, command: str, subaction: Optional[str] = None) -> bool:
+        commands = self._config.get("commands", {})
+        entry = commands.get(command, {})
+        if subaction is not None:
+            entry = entry.get(subaction, {})
+        return bool(entry.get("requireAuthentication", False))
+
+    def get(self, path: str, default=None):
+        keys = path.split(".")
+        value = self._config
+
+        for key in keys:
+            if not isinstance(value, dict) or key not in value:
+                return default
+            value = value[key]
+        return value
+
+    def dumpData(self) -> Dict[str, Any]:
+        return self._stripInternal(self._config)
+
+    def __repr__(self):
+        return f"<NexaCmdConfig path='{self.configPath}'>"

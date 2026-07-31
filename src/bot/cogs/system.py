@@ -188,9 +188,7 @@ class SystemCog(commands.Cog):
 
     @app_commands.command(name="check_updates", description="Manually check for Nexa updates.")
     async def check_updates(self, interaction: Interaction):
-        if not await self.bot.check_terms(interaction):
-            return
-        if not await self.bot.check_operator(interaction):
+        if not await self.bot.guard.evaluate(interaction, "check_updates"):
             return
 
         await interaction.response.defer(ephemeral=True)
