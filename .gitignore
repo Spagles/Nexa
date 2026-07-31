@@ -188,6 +188,7 @@ instances/
 databases/
 NexaBotConfig.yaml
 NexaInstanceRegistry.yaml
+NexaBotCmdCfg.yaml
 secrets.env
 # Let it be known that staging is not a directory for the codebase. It is a directory used by Nexa's CI/CD pipeline regarding modpacks and instances.
 staging/

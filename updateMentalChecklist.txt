@@ -4,7 +4,7 @@ src/main.py
 - Line 37, bump currentNexaVersion.
 
 src/bot/discordBot.py
-- Line 32, update the VERSION string.
+- Line 33, update the VERSION string.
 
 src/bot/cogs/system.py
 - Line 31, bump CURRENT_NEXA_VERSION.
