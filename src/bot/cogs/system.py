@@ -28,7 +28,7 @@ logger = nexaLoggerFactory.get_logger("SystemCog")
 # Update checker constants
 # ---------------------------------------------------------------------------
 
-CURRENT_NEXA_VERSION = "0.3.0-beta-pre3"
+CURRENT_NEXA_VERSION = "0.3.0-beta-pre4"
 UPDATE_INDEX_URL = "https://raw.githubusercontent.com/StormCode-dev/Nexa/refs/heads/main/updateIndex.json"
 
 
