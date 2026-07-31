@@ -318,7 +318,7 @@ class OperatorCog(commands.Cog):
             if current.lower() in n.lower()
         ]
 
-    async def _awaitSftpSessionTeardown(self, session) -> None:
+    async def _awaitSftpSessionTeardown(self, session, tgt, instance) -> None:
         try:
             outcome = await self.sftpService.endSession(session)
             logger.info(f"SFTP session for Discord user {session.discordUserID} ended: {outcome.reason}")
@@ -327,6 +327,8 @@ class OperatorCog(commands.Cog):
                          f"{session.discordUserID}: {e}")
         finally:
             nxbotCmdGeneral.deregisterOperation(session.discordUserID)
+            tgt.locked = True
+            logger.info(f"Instance '{instance}' lock automatically removed at SFTP server teardown")
 
     # ------------------------------------------------------------------
     # /keyman command group - Head Operator only
@@ -603,6 +605,21 @@ class OperatorCog(commands.Cog):
             if not await _ensureOpHasCorrectPerms(responder, self.verifService, ["fsaccess"]):
                 return
 
+        # Check instance, lock it, whole nine yards
+        tgt = self.bot.instance_manager.get_instance(instance)
+        if not tgt:
+            await responder.send(f"Instance `{instance}` not found.", ephemeral=True)
+            return
+        if tgt.status in (ServerStatus.ONLINE, ServerStatus.STARTING):
+            await responder.send(
+                f"`{instance}` is currently {tgt.status.value} and cannot have its files exposed to.",
+                ephemeral=True
+            )
+            return
+
+        tgt.locked = True
+        logger.info(f"Instance '{instance}' locked by {interaction.user} ({interaction.user.id}) in prep for file access.")
+    
         try:
             jail_root = _resolve_instance_folder(self.bot, instance)
         except ValueError as exc:
@@ -675,7 +692,7 @@ class OperatorCog(commands.Cog):
             label=jail_root.name,
         )
 
-        asyncio.create_task(self._awaitSftpSessionTeardown(session))
+        asyncio.create_task(self._awaitSftpSessionTeardown(session, tgt=tgt, instance=instance))
 
         key_bytes = session.privateKeyPem.encode("utf-8") if session.privateKeyPem else b""
         await interaction.user.send(

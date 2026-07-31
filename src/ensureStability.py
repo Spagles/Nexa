@@ -64,7 +64,6 @@ def checkIfAbleToRun(config: NexaConfig):
             sys.exit(1)
 
     # Check that a primary instance is configured and that it exists in the instance registry.
-    # I didn't see the point in using a flawed library. Written with pyyaml directly instead.
     primaryInstanceName = config.get("general.primaryInstance")
     if not primaryInstanceName:
         print("No primary instance is configured. Please set 'general.primaryInstance' in NexaBotConfig.yaml.")
