@@ -70,8 +70,8 @@ class NexaBot(commands.Bot):
         )
 
         # Command Config
-        self.cmdConfig = cmdConfig if isinstance(cmdConfig, NexaCmdConfig) else(
-            config if isinstance(cmdConfig, str) else "NexaBotCmdCfg.yaml"
+        self.cmdConfig = cmdConfig if isinstance(cmdConfig, NexaCmdConfig) else NexaCmdConfig(
+            cmdConfig if isinstance(cmdConfig, str) else "NexaBotCmdCfg.yaml"
         )
 
         self.statusChannelID = statusChannelID or self.config.get("discord.statusChannel", None)
