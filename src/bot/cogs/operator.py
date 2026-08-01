@@ -289,6 +289,55 @@ class _HeadOperatorApprovalView(discord.ui.View):
         self.stop()
         await interaction.response.send_message("Denied.", ephemeral=True)
 
+class NotificationHelper:
+    def __init__(self, bot: "NexaBot"): #type: ignore
+        self.bot = bot
+
+    async def dmHeadOperator(self, message: str) -> None:
+        head_operator_id = self.bot.config.get("security.headOperator", 0)
+        if not head_operator_id:
+            logger.warning("Head operator ID is not configured.")
+            return
+
+        user = await self._fetch_user(head_operator_id)
+        if user is None:
+            logger.warning(f"Head operator user {head_operator_id} could not be resolved.")
+            return
+
+        await self._send_dm(user, message)
+
+    async def dmAllOperators(self, message: str) -> None:
+        print("Sending DM to all Operators")
+        operator_ids = set(self.bot.config.get("security.serverOperators", []) or [])
+        head_operator_id = self.bot.config.get("security.headOperator", 0)
+        print(f"operator_ids: {operator_ids}")
+        print(f"head_operator_id: {head_operator_id}")
+        if head_operator_id:
+            operator_ids.add(head_operator_id)
+
+        for user_id in operator_ids:
+            user = await self._fetch_user(user_id)
+            if user is not None:
+                print(f"sending a DM to {user}")
+                await self._send_dm(user, message)
+
+    async def _fetch_user(self, user_id: int) -> discord.User | None:
+        try:
+            return await self.bot.fetch_user(user_id)
+        except discord.NotFound:
+            return None
+        except discord.HTTPException as exc:
+            logger.warning(f"Failed to fetch user {user_id}: {exc}")
+            return None
+
+    async def _send_dm(self, user: discord.User, message: str) -> None:
+        try:
+            await user.send(message)
+        except discord.Forbidden:
+            logger.warning(f"Cannot DM user {user.id}; DMs are closed.")
+        except discord.HTTPException as exc:
+            logger.warning(f"Failed to DM user {user.id}: {exc}")
+
 class OperatorCog(commands.Cog):
     """Discord commands for operators."""
 
@@ -1015,56 +1064,6 @@ class OperatorCog(commands.Cog):
 
         await interaction.response.send_message(f"Force stopping `{tgt.name}`.", ephemeral=True)
         asyncio.create_task(self.bot.instance_manager.stop_instance(tgt.name, hard=True))
-
-class NotificationHelper:
-    def __init__(self, bot: "NexaBot"): #type: ignore
-        self.bot = bot
-
-    async def dmHeadOperator(self, message: str) -> None:
-        head_operator_id = self.bot.config.get("security.headOperator", 0)
-        if not head_operator_id:
-            logger.warning("Head operator ID is not configured.")
-            return
-
-        user = await self._fetch_user(head_operator_id)
-        if user is None:
-            logger.warning(f"Head operator user {head_operator_id} could not be resolved.")
-            return
-
-        await self._send_dm(user, message)
-
-    async def dmAllOperators(self, message: str) -> None:
-        print("Sending DM to all Operators")
-        operator_ids = set(self.bot.config.get("security.serverOperators", []) or [])
-        head_operator_id = self.bot.config.get("security.headOperator", 0)
-        print(f"operator_ids: {operator_ids}")
-        print(f"head_operator_id: {head_operator_id}")
-        if head_operator_id:
-            operator_ids.add(head_operator_id)
-
-        for user_id in operator_ids:
-            user = await self._fetch_user(user_id)
-            if user is not None:
-                print(f"sending a DM to {user}")
-                await self._send_dm(user, message)
-
-    async def _fetch_user(self, user_id: int) -> discord.User | None:
-        try:
-            return await self.bot.fetch_user(user_id)
-        except discord.NotFound:
-            return None
-        except discord.HTTPException as exc:
-            logger.warning(f"Failed to fetch user {user_id}: {exc}")
-            return None
-
-    async def _send_dm(self, user: discord.User, message: str) -> None:
-        try:
-            await user.send(message)
-        except discord.Forbidden:
-            logger.warning(f"Cannot DM user {user.id}; DMs are closed.")
-        except discord.HTTPException as exc:
-            logger.warning(f"Failed to DM user {user.id}: {exc}")
-
 
 async def setup(bot: "NexaBot"):  # type: ignore
     await bot.add_cog(OperatorCog(bot))
