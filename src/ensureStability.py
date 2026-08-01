@@ -64,7 +64,6 @@ def checkIfAbleToRun(config: NexaConfig):
             sys.exit(1)
 
     # Check that a primary instance is configured and that it exists in the instance registry.
-    # I didn't see the point in using a flawed library. Written with pyyaml directly instead.
     primaryInstanceName = config.get("general.primaryInstance")
     if not primaryInstanceName:
         print("No primary instance is configured. Please set 'general.primaryInstance' in NexaBotConfig.yaml.")
@@ -83,5 +82,12 @@ def checkIfAbleToRun(config: NexaConfig):
     instances = registryData.get("instances") or {}
     if primaryInstanceName not in instances:
         print(f"Configured primary instance '{primaryInstanceName}' was not found in {registryPath}. Please check 'general.primaryInstance' in NexaBotConfig.yaml.")
+        input("Press Enter to continue . . .")
+        sys.exit(1)
+
+    # Check that a Head Operator is configured. 
+    headOperatorID = config.get("security.headOperator", 0)
+    if not isinstance(headOperatorID, int) or headOperatorID <= 0 or len(str(headOperatorID)) < 17:
+        print("No valid Head Operator is configured. Please set 'security.headOperator' in NexaBotConfig.yaml to a valid Discord user ID.")
         input("Press Enter to continue . . .")
         sys.exit(1)

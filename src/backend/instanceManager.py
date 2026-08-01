@@ -7,6 +7,7 @@ from enum import Enum
 import subprocess
 import os
 from backend.configLib import parseConfig, getConfigVal, parseServerProperties
+from backend.serverPropertiesConfig import ServerPropertiesConfig, ensureRconEnabled
 from services.nexaConfig import NexaInstanceConfig, NexaConfig
 from services import nexaLoggerFactory
 from mcrcon import MCRcon
@@ -91,7 +92,13 @@ class ServerInstance:
         if val is None:
             return default
         return val.lower() == "true"
- 
+
+    def refresh_rcon_state(self):
+        self.server_props = self._load_server_properties()
+        self.rcon_enabled = self._get_bool("enable-rcon")
+        self.rconPass = self.server_props.get("rcon.password")
+        self.rcon_port = int(self.server_props.get("rcon.port"))
+
     def _get_server_players(self):
         try:
             with MCRcon("127.0.0.1", self.rconPass, port=self.rcon_port) as mcr:
@@ -227,6 +234,12 @@ class InstanceManager:
             return
 
         try:
+            props = ServerPropertiesConfig(str(instance.folder / "server.properties"))
+            password = ensureRconEnabled(props)
+            if password:
+                logger.info(f"RCON was disabled for '{name}'. Enabled it with a freshly generated password.")
+                instance.refresh_rcon_state()
+
             instance.set_status(ServerStatus.STARTING, owner=owner)
 
             proc = subprocess.Popen(
@@ -236,16 +249,6 @@ class InstanceManager:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-
-            # A different one with console output on
-            #proc = subprocess.Popen(
-            #    instance.startCmd,
-            #    cwd=str(instance.folder),
-            #    shell=True,
-            #    stdout=subprocess.PIPE,
-            #    stderr=subprocess.STDOUT,
-            #    text=True
-            #)
 
             instance.active_process = proc
             print(f"[InstanceManager] Launched {name} with PID {proc.pid}")

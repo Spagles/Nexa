@@ -83,14 +83,13 @@ class NexaAuthenticationService:
 
     # --- Operator key (/keyman) settings ---
     OPERATOR_KEYS_ROOT = "additionalOperatorKeys"
-    KNOWN_CAPABILITIES = {"modpackInstalls", "fsaccess"}  # extend as new capabilities are added
+    KNOWN_CAPABILITIES = {"modpackInstalls", "fsaccess", "lockAndUnlockInstances", "executeRCON"}  # extend as new capabilities are added
 
     # Operator codes use a FIXED salt (unlike the Head Operator's per-entry salt) so that
     # verifyOperatorKey() can hash the candidate once and do a direct dict-key lookup - true
     # O(1) auth, no scanning, no re-hashing per stored entry. This is safe specifically because
     # operator codes are Nexa-generated high-entropy random strings, not human-chosen secrets -
     # there's no dictionary/rainbow-table risk a per-entry salt would need to defend against here.
-    # Mirrors protectedDB's own use of a fixed static salt for its KDF.
     OPERATOR_CODE_SALT = b"nexaOperatorKeys-fixed-salt-Qx7mP2vLk9"
 
     # Code generation: random, alphanumeric, ambiguous characters excluded, grouped for manual entry.
