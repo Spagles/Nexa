@@ -85,25 +85,6 @@ def _issueTicket() -> None:
     import time
     _headOperatorTicketExpiresAt = time.time() + TICKET_LIFETIME_SECONDS
 
-
-def _buildAuthService(config: NexaConfig, notificationService: NotificationHelper) -> NexaAuthenticationService:
-    """
-    Constructs a fresh protectedDB + NexaAuthenticationService pair pointed at keys.nxdb.
-    Instantiation is normalized to CWD, so this works identically wherever it's called from.
-
-    config: the bot's NexaConfig instance (self.bot.config), passed through to
-            NexaAuthenticationService as configClass.
-    """
-    db_key = os.environ.get("NEXABOT_PROTECTED_KEY")
-    keySystem = protectedDB(
-        dbPath=Path("databases") / "keys.nxdb",
-        password=db_key,
-        create_if_missing=True
-    )
-    return NexaAuthenticationService(protectedDB=keySystem, configClass=config, notifier=notificationService)
-
-
-
 async def _ensureHeadOperatorTicket(responder: InteractionResponder, verifService: NexaVerifService) -> bool:
     """
     Called by every /keyman subcommand immediately after guard.evaluate(),
@@ -337,6 +318,22 @@ class NotificationHelper:
             logger.warning(f"Cannot DM user {user.id}; DMs are closed.")
         except discord.HTTPException as exc:
             logger.warning(f"Failed to DM user {user.id}: {exc}")
+
+def _buildAuthService(config: NexaConfig, notificationService: "NotificationHelper") -> NexaAuthenticationService:
+    """
+    Constructs a fresh protectedDB + NexaAuthenticationService pair pointed at keys.nxdb.
+    Instantiation is normalized to CWD, so this works identically wherever it's called from.
+
+    config: the bot's NexaConfig instance (self.bot.config), passed through to
+            NexaAuthenticationService as configClass.
+    """
+    db_key = os.environ.get("NEXABOT_PROTECTED_KEY")
+    keySystem = protectedDB(
+        dbPath=Path("databases") / "keys.nxdb",
+        password=db_key,
+        create_if_missing=True
+    )
+    return NexaAuthenticationService(protectedDB=keySystem, configClass=config, notifier=notificationService)
 
 class OperatorCog(commands.Cog):
     """Discord commands for operators."""
