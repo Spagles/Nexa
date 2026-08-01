@@ -480,7 +480,7 @@ class ModpackInstaller:
         staged_proc = subprocess.Popen(
             instance.startCmd,
             cwd=str(staged_instance),
-            shell=False,
+            shell=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
