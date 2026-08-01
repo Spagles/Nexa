@@ -55,6 +55,12 @@ Note that the format is {name of the variable}={contents of said variable}.
 
 Additionally, if you want to use PlayIt to tunnel your server instances, install that and **register it to your PATH**.
 
+You will also need to make a file where Nexa will run from called `setupAuthKey.txt`. Inside this file, put:
+
+```
+key=<your key, 16 characters or more in length, exlcuding symbols like :;,!@&$>
+```
+
 
 ## 4: Auto-generate everything
 
@@ -64,11 +70,11 @@ Go ahead and run Nexa either by launching the binary or running...
 python src/main.py
 ```
 
-Immediately stop the proccess.
+Immediately stop the proccess. Your chosen auth key will be safely stored and deleted off your disc.
 
 ## 5: Modifying the Config
 
-Nexa should've auto-generated these configs files as a descendent of its parent.
+Nexa should've auto-generated the following listed config files as a descendent of its parent. Where flagged, modify as you see fit.
 
 ```NexaBotConfig.yaml
 general:
@@ -77,17 +83,19 @@ general:
   configVersion: 1
 discord:
   enable: true
-  preventRandomPeopleFromStoppingInstances: true
-  lockToAuthorizedGuild: false
-  authorizedGuilds: []
-  statusChannelID: 0
-  healthIssuesChannelID: 0
+  lockToAuthorizedGuild: false -- CONFIGURE
+  authorizedGuilds: [] -- CONFIGURE. THIS IS A LIST. Example: [12475923783, 827469826764]
+  statusChannelID: 0 -- CONFIGURE
+  healthIssuesChannelID: 0 -- CONFIGURE
   updateInterval: 30
-  enableSuperUsers: false
-  superUsers: []
+  enableSuperUsers: false -- CONFIGURE
+  superUsers: [] -- CONFIGURE. THIS IS A LIST. Example: [12475923783, 827469826764]
 security:
-  enableServerOperators: false
-  serverOperators: []
+  enableServerOperators: false -- CONFIGURE AS TRUE FOR MORE COMMANDS
+  serverOperators: [] -- CONFIGURE. THIS IS A LIST. Example: [12475923783, 827469826764]
+  headOperator: 0 -- CONFIGURE
+  shadyAuthAttemptThreshold: 10 -- CONFIGURE
+  sftpConnectionLengthInMins: 15 -- CONFIGURE
   allowNexaDesktop: false
 networking:
   usePlayIt: true
@@ -103,30 +111,84 @@ logging:
     vm: INFO
     config: WARNING
 automaticModpackBootstrapper:
-  strictModVerification: true
+  strictModVerification: true -- This will tell Nexa's Automatic Modpack Installer to skip the Modrinth + Compatibility check, essentially a blind download and test run. Configure as you see fit.
 serverHealthManagement:
-  keepNexaAlive: true
+  keepNexaAlive: true -- CONFIGURE. True = Restart Nexa. False = No restart Nexa on failure.
   keepAliveIntervalInSecs: 60
-  keepPlayItAlive: true
-  updateCheckIntervalInMins: 15
+  keepPlayItAlive: true -- CONFIGURE
+  updateCheckIntervalInMins: 15 -- CONFIGURE. Frequency of Nexa update checks.
 
+```
+
+```NexaInstanceRegistry.yaml
+instances: {} -- CONFIGURE. SHOWN BELOW IN SECTION 6.
 ```
 
 and
 
-```NexaInstanceRegistry.yaml
-instances: {}
+```NexaBotCmdCfg.yaml
+commands:
+  status:
+    enabled: true
+    permissionLevel: everyone
+  start:
+    permissionLevel: everyone
+  start_specific:
+    permissionLevel: everyone
+  stop:
+    permissionLevel: superuser
+  stop_specific:
+    permissionLevel: superuser
+  execute:
+    enabled: true -- CONFIGURE. This will allow the specified clearance level RCON access to an instance.
+    permissionLevel: operator
+    requireAuthentication: true
+  lock_instance:
+    enabled: true
+    permissionLevel: operator
+    requireAuthentication: false
+  unlock_instance:
+    enabled: true
+    permissionLevel: operator
+    requireAuthentication: false
+  force_stop:
+    enabled: true
+    permissionLevel: operator
+  install_mcpk:
+    enabled: true
+    permissionLevel: operator
+    requireAuthentication: true
+    shutdownWaitPeriodInMins: 15 -- CONFIGURE. This command will schedule an instance shutdown for this given time.
+  keyman:
+    enabled: true
+    permissionLevel: headOperator
+    issue:
+      requireAuthentication: true
+    modify:
+      requireAuthentication: true
+    revoke:
+      requireAuthentication: true
+    rotate:
+      requireAuthentication: true
+    list:
+      requireAuthentication: true
+  fsaccess:
+    enabled: true -- CONFIGURE. This will expose a LIVE FILESYSTEM TO A VERIFIED OPERATOR WITH A VALID CREDENTIAL YOU ISSUE. IF YOU DO NOT TRUST ANYONE, DISABLE THIS TO REMOVE THE 
+    -- POTENTIAL SURFACE AREA.
+    permissionLevel: operator
+    requireAuthentication: true
+    askHeadOperatorForApproval: true
+  check_updates:
+    enabled: true
+    permissionLevel: superuser
+
 ```
 
-Because this is YAML, you can swap it for something readable. For the best settings, set in NexaBotConfig...
+For general info, `requireAuthentication` will gate that command behind Nexa's Web-based Authenticator. See the `keyman` bucket of commands below for more info.
 
-- discord.lockToAuthorizedGuilds: true
-- authorizedGuilds: [serverID, orMultiple, asAWholeNumber]
-- enableSuperUsers: true (for added security and management of your server instances. Makes all commands work)
-- superUsers: [againAWholeNumberOfYourDiscordUserID, andMoreSinceThisIsAList]
-- statusChannelID: Whole number of the channelID from your set up discord server.
-
-I also would keep the update interval the same to prevent discord rate limits, even with Nexa's rate limit safeguards.
+`permissionLevel` and `requireAuthentication` must agree. This isn't enforced, but your command situation will get borked if not set properly. For `operator` as the permission
+level and above, `requireAuthentication` should be on. If the permission level is set at `superuser` or `everyone`, and `requireAuthentication` is on, that permission level
+won't get to be able to use those commands.
 
 ## 6: Setting up instances
 
@@ -169,6 +231,8 @@ instances:
 
 Of course, don't just paste this in. Follow this format and rename things to agree with your settings.
 
+Importantly, make sure `version` and `loaderType` are correct. For something non-standard like PaperMC, fill `loaderType` in as `paper`.
+
 ## 7: Run...again.
 
 Run Nexa, and stop it again.
@@ -178,7 +242,8 @@ This time, you'll see both a status embed pop up in your status channel and a Ne
 ```NexaServerSettings.yaml
 configVersion: 1
 functionality:
-  startCmd: java -Xmx4G -Xms4G -jar server.jar nogui
+  startCmd: java -Xmx4G -Xms4G -jar server.jar nogui -- CONFIGURE. This is important. This executes at the directory of the instance. Make sure server.jar matches whatever JAR
+  -- exists in that directory as the Minecraft Server program. If your instance contains a start.bat or start.sh file, you can use that command and it'll work.
   join_to_wake: false
   watchdog:
     enabled: true
@@ -220,23 +285,23 @@ All commands are slash command. Users require appropriate discord permissions un
 |---|---|
 | `/start` | Starts the primary instance defined in NexaBotConfig. |
 | `/stop` | Stops the primary instance defined in NexaBotConfig gracefully. |
-| `/start_specific <instance>` | Starts the named instance in the command. |
-| `/stop_specific <instance>` | Stops the named instance in the command gracefully. |
-| `/force_stop <instance>` | Forcefully stops the named instance, regardless of player count or settings. Superuser Only |
+| `/start_specific` | Starts the named instance in the command. |
+| `/stop_specific` | Stops the named instance in the command gracefully. |
+| `/force_stop` | Forcefully stops the named instance, regardless of player count or settings. |
 
-### Instance Management (Superuser Only)
-
-| Command | Description |
-|---|---|
-| `/lock_instance <instance>` | Locks the named instance from being interacted with, including superusers. |
-| `/unlock_instance <instance>` | Unlocks the named instance. |
-| `/execute <instance>` | Executes a command on the instance. |
-
-### Modpack Management (Superuser Only)
+### Instance Management
 
 | Command | Description |
 |---|---|
-| `/install_modpack <url_to_file> <instance>` | Downloads and installs a .mrpack to the specified instance from a direct URL, with redirects followed. |
+| `/lock_instance` | Locks the named instance from being interacted with for everyone. |
+| `/unlock_instance` | Unlocks the named instance. |
+| `/execute` | Executes a command on the instance. |
+
+### Modpack Management
+
+| Command | Description |
+|---|---|
+| `/install_modpack` | Downloads and installs a .mrpack to the specified instance from a direct URL, with redirects followed. |
 
 ### User
  
@@ -244,6 +309,19 @@ All commands are slash command. Users require appropriate discord permissions un
 |---|---|
 | `/userdata` | Allows any user who has interacted with the bot to view or delete their stored data |
  
+### Keyman Bucket (/keyman <cmd>)
+
+This is locked behind the Head Operator by default. You hold the credential for this command as the person setting up Nexa. This can generate Authentication Keys for 
+users you wish to grant operator-level access for. Make sure the keys generated are not shared with anyone other than the intended person.
+
+| Command | Description |
+|---|---|
+| `/issue` | Issues a new Authentication Key with one permission to one user who is listed in NexaBotConfig.yaml as a serverOperator. |
+| `/list` | Lists the permissions for a user with a valid Authentication Key. |
+| `/modify` | Add/Remove a permission from a user with a valid Authentication Key. |
+| `/revoke` | Removes an Authentication Key for a user. |
+| `/rotate` | Removes and regenerates an Authentication Key for a user. |
+
 ---
 
 ## Modpack Management

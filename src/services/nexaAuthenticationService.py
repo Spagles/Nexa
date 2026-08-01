@@ -90,7 +90,6 @@ class NexaAuthenticationService:
     # O(1) auth, no scanning, no re-hashing per stored entry. This is safe specifically because
     # operator codes are Nexa-generated high-entropy random strings, not human-chosen secrets -
     # there's no dictionary/rainbow-table risk a per-entry salt would need to defend against here.
-    # Mirrors protectedDB's own use of a fixed static salt for its KDF.
     OPERATOR_CODE_SALT = b"nexaOperatorKeys-fixed-salt-Qx7mP2vLk9"
 
     # Code generation: random, alphanumeric, ambiguous characters excluded, grouped for manual entry.
