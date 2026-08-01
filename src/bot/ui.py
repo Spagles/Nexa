@@ -1,7 +1,7 @@
 # ui.py
 # Under the MIT License.
 #
-# Shared UI primitives for NexaBot.
+# Shared UI primitives for Nexa.
 # Includes menus, embeds, and authorization components used across cogs.
 
 import inspect
@@ -53,12 +53,29 @@ class SimpleMenu(discord.ui.View):
         self.pages.append(MenuPage(title, description, on_enter, buttons))
         return self
 
-    async def send(self, interaction: Interaction):
+    async def send(self, interaction: Interaction, *, already_deferred: bool = False):
+        """
+        Sends this menu as the response to an interaction.
+
+        already_deferred: pass True if the interaction has already had
+        interaction.response.defer(...) (or any other response) called on it before
+        this method runs - e.g. by an auth/verification step earlier in the command.
+        When True, this uses interaction.followup.send(...) instead of
+        interaction.response.send_message(...), since a Discord interaction can only
+        be responded to once via .response, and calling it a second time raises
+        discord.errors.InteractionResponded. Defaults to False so every existing
+        caller keeps its current behavior unchanged.
+        """
         self._build_page()
-        await interaction.response.send_message(
-            embed=self._embed(), view=self, ephemeral=self.ephemeral
-        )
-        self.message = await interaction.original_response()
+        if already_deferred:
+            self.message = await interaction.followup.send(
+                embed=self._embed(), view=self, ephemeral=self.ephemeral, wait=True
+            )
+        else:
+            await interaction.response.send_message(
+                embed=self._embed(), view=self, ephemeral=self.ephemeral
+            )
+            self.message = await interaction.original_response()
         await self._run_on_enter(interaction)
 
     async def refresh(self, interaction: Interaction):
@@ -68,7 +85,7 @@ class SimpleMenu(discord.ui.View):
     def _embed(self) -> discord.Embed:
         page = self.pages[self.index]
         embed = discord.Embed(title=page.title, description=page.description, color=0x5865F2)
-        embed.set_footer(text=f"Page {self.index + 1}/{len(self.pages)} • Nexabot")
+        embed.set_footer(text=f"Page {self.index + 1}/{len(self.pages)} • Nexa")
         return embed
 
     async def _run_on_enter(self, interaction: Interaction):
@@ -140,6 +157,23 @@ class SimpleMenu(discord.ui.View):
 
 
 # ---------------------------------------------------------------------------
+# Views
+# ---------------------------------------------------------------------------
+
+class ServerStatusView(discord.ui.View):
+    def __init__(self, instance: ServerInstance):
+        super().__init__(timeout=None)
+        self.instance = instance
+
+        self.add_item(discord.ui.Button(
+            label="Start",
+            style=discord.ButtonStyle.success,
+            custom_id=f"start_instance:{instance.name}",
+            emoji="▶"
+        ))
+
+
+# ---------------------------------------------------------------------------
 # Embeds
 # ---------------------------------------------------------------------------
 
@@ -153,10 +187,11 @@ class ServerStatusEmbed:
             ServerStatus.STARTING: 0xFEE75C,
             ServerStatus.OFFLINE:  0xED4245,
             ServerStatus.SLEEPING: 0x5865F2,
+            ServerStatus.CRASHED:  0xED4245,
         }
         color = color_map.get(self.instance.status, 0x5865F2)
         embed = discord.Embed(
-            title=f"Server Status: {self.instance.name}",
+            title=f"Server Status: {self.instance.displayName}",
             color=color,
             timestamp=datetime.now(timezone.utc)
         )
@@ -166,8 +201,17 @@ class ServerStatusEmbed:
         embed.add_field(name="Modloader", value=self.instance.loader,   inline=True)
         if self.instance.icon_url:
             embed.set_thumbnail(url=self.instance.icon_url)
-        embed.set_footer(text="Nexa V2")
+        embed.set_footer(text="Nexa")
         return embed
+
+    def build_view(self) -> Optional["ServerStatusView"]:
+        """
+        Returns the button view paired with this embed, or None if no
+        actionable button applies to the instance's current status.
+        """
+        if self.instance.status not in (ServerStatus.OFFLINE, ServerStatus.CRASHED):
+            return None
+        return ServerStatusView(self.instance)
 
 
 # ---------------------------------------------------------------------------

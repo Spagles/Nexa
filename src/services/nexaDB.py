@@ -204,18 +204,20 @@ class unprotectedDB:
 class protectedDB:
     """
     Encrypted database class for secure data storage.
-    
+
     Uses AES-GCM to encrypt the entire JSON blob at rest.
     In-memory, data is stored as a standard Python dict.
-    
+
     Threat Model:
     - Encryption at rest with authenticated encryption (AES-GCM)
     - Tamper detection via GCM auth tag. Corrupted or modified files will raise ValueError on load
+    - Per-file random salt (scrypt), preventing rainbow-table / multi-target attacks across databases
     - Does NOT protect against memory scraping or runtime attacks
     - Volatile in-memory data. Unload asap after making changes to minimize risk.
     - Assumes server environment is trusted
 
-    File layout: [nonce: 12 bytes][tag: 16 bytes][ciphertext: n bytes]
+    File layout (v2): [salt: 16 bytes][nonce: 12 bytes][tag: 16 bytes][ciphertext: n bytes]
+    Legacy layout (v1, static salt): [nonce: 12 bytes][tag: 16 bytes][ciphertext: n bytes]
 
     # Methods:
     - load(): Load the database from the file into memory (private variable).
@@ -228,15 +230,19 @@ class protectedDB:
     - exists(key: str): Existence checker method that checks if a specific directory inside the database exists.
     """
 
-    # Simple static salt.
-    _SALT = b'nexaDB-salt-K9ui9pyWwfR9T1H1XiHz'
+    _SALT_LEN = 16
+    _NONCE_LEN = 12
+    _TAG_LEN = 16
+
+    # Legacy static salt, kept ONLY to allow reading/migrating old v1 files.
+    _LEGACY_SALT = b'nexaDB-salt-K9ui9pyWwfR9T1H1XiHz'
 
     def __init__(self, dbPath: Path, password: str, create_if_missing: bool = False):
         logger.info(f"Protected Database construction invoked by {inspect.currentframe().f_back.f_globals['__name__']}.{inspect.currentframe().f_back.f_code.co_name}() at line {inspect.currentframe().f_back.f_lineno}.")
         self.dbPath = dbPath
         self.password = password
         self.data = None
-        self._key = self._derive_key(password)
+        self._salt = None  # set during load()/prime(), NOT derived up front anymore
 
         # Check if the specified directory exists, error if not
         if not self.dbPath.parent.exists():
@@ -247,7 +253,7 @@ class protectedDB:
                 self.dbPath.parent.mkdir(parents=True, exist_ok=True)
                 self.prime()
 
-    def _derive_key(self, password: str) -> bytes:
+    def _derive_key(self, password: str, salt: bytes) -> bytes:
         """
         Derive a 32-byte AES key from the password using scrypt.
         scrypt provides memory-hard key stretching, making brute-force attacks significantly more expensive
@@ -255,7 +261,7 @@ class protectedDB:
         """
         return scrypt(
             password.encode("utf-8"),
-            salt=self._SALT,
+            salt=salt,
             key_len=32,
             N=2**14,  # CPU/memory cost factor
             r=8,       # Block size
@@ -268,40 +274,88 @@ class protectedDB:
         Raises ValueError if the file has been tampered with or the password is incorrect.
         """
         if not self.dbPath.exists():
+            self._salt = get_random_bytes(self._SALT_LEN)
             self.data = {}
             return
 
         with open(self.dbPath, "rb") as f:
             raw = f.read()
-            if len(raw) < 28:  # 12 (nonce) + 16 (tag) minimum
-                raise ValueError("Encrypted file too short or corrupted")
 
-            nonce = raw[:12]
-            tag = raw[12:28]
-            ciphertext = raw[28:]
+        # Try v2 layout first: salt + nonce + tag + ciphertext
+        min_v2_len = self._SALT_LEN + self._NONCE_LEN + self._TAG_LEN
+        if len(raw) >= min_v2_len:
+            salt = raw[:self._SALT_LEN]
+            nonce = raw[self._SALT_LEN:self._SALT_LEN + self._NONCE_LEN]
+            tag = raw[self._SALT_LEN + self._NONCE_LEN:min_v2_len]
+            ciphertext = raw[min_v2_len:]
 
-            cipher = AES.new(self._key, AES.MODE_GCM, nonce=nonce)
+            key = self._derive_key(self.password, salt)
+            cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
             try:
                 plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+                self._salt = salt
+                self.data = json.loads(plaintext)
+                return
             except ValueError:
-                raise ValueError("Database integrity check failed. File may be corrupted or tampered with, or the password is incorrect.")
+                pass  # fall through and try legacy layout below
 
-            self.data = json.loads(plaintext)
+        # Fall back to legacy v1 layout: nonce + tag + ciphertext, static salt
+        min_v1_len = self._NONCE_LEN + self._TAG_LEN
+        if len(raw) < min_v1_len:
+            raise ValueError("Encrypted file too short or corrupted")
+
+        nonce = raw[:self._NONCE_LEN]
+        tag = raw[self._NONCE_LEN:min_v1_len]
+        ciphertext = raw[min_v1_len:]
+
+        key = self._derive_key(self.password, self._LEGACY_SALT)
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        try:
+            plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+        except ValueError:
+            raise ValueError("Database integrity check failed. File may be corrupted or tampered with, or the password is incorrect.")
+
+        self._salt = self._LEGACY_SALT
+        self.data = json.loads(plaintext)
+        logger.warning(f"Database at '{self.dbPath}' was loaded using the legacy static-salt format. Call migrate_to_v2() to upgrade it.")
+
+    def migrate_to_v2(self) -> None:
+        """
+        Upgrades a loaded legacy (static-salt) database to the v2 format by
+        generating a fresh random salt and rewriting the file. No-op if the
+        database is already on a per-file salt (including a freshly primed one).
+        """
+        if self.data is None:
+            raise databaseIsUnloadedError("Database has not been loaded. Please call load() before migrating.")
+        if self._salt != self._LEGACY_SALT:
+            return  # already v2, nothing to do
+
+        self._salt = get_random_bytes(self._SALT_LEN)
+        self.unload()  # writes out in v2 layout using the new salt
+        self.load()    # reload so self.data / self._salt reflect the migrated file
 
     def unload(self) -> None:
         """
         Encrypt and save database to file, then clear from memory.
+        Always writes in the current (v2) layout: salt + nonce + tag + ciphertext.
         """
         if self.data is None:
             return
 
+        if self._salt is None or self._salt == self._LEGACY_SALT:
+            # First-ever save, or saving after a legacy load without explicit
+            # migration: generate a fresh per-file salt so we never persist
+            # the legacy static salt going forward.
+            self._salt = get_random_bytes(self._SALT_LEN)
+
+        key = self._derive_key(self.password, self._salt)
         plaintext = json.dumps(self.data, indent=4).encode("utf-8")
-        nonce = get_random_bytes(12)
-        cipher = AES.new(self._key, AES.MODE_GCM, nonce=nonce)
+        nonce = get_random_bytes(self._NONCE_LEN)
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
         ciphertext, tag = cipher.encrypt_and_digest(plaintext)
 
         with open(self.dbPath, "wb") as f:
-            f.write(nonce + tag + ciphertext)  # 12 + 16 + n bytes
+            f.write(self._salt + nonce + tag + ciphertext)
 
         self.data = None
 
@@ -310,6 +364,7 @@ class protectedDB:
         Creates data inside database that gets the database minimally functional.
         Routes through unload() to ensure the file is written encrypted from the start.
         """
+        self._salt = get_random_bytes(self._SALT_LEN)
         self.data = {}
         self.unload()
 

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import yaml
 from services.nexaConfig import NexaConfig
 
 def checkIfAbleToRun(config: NexaConfig):
@@ -61,3 +62,32 @@ def checkIfAbleToRun(config: NexaConfig):
             print(f"An error occurred while checking Java version: {e}")
             input("Press Enter to continue . . .")
             sys.exit(1)
+
+    # Check that a primary instance is configured and that it exists in the instance registry.
+    primaryInstanceName = config.get("general.primaryInstance")
+    if not primaryInstanceName:
+        print("No primary instance is configured. Please set 'general.primaryInstance' in NexaBotConfig.yaml.")
+        input("Press Enter to continue . . .")
+        sys.exit(1)
+
+    registryPath = Path("NexaInstanceRegistry.yaml")
+    if not registryPath.exists():
+        print(f"Instance registry not found at {registryPath}. Cannot verify primary instance.")
+        input("Press Enter to continue . . .")
+        sys.exit(1)
+
+    with open(registryPath, "r", encoding="utf-8") as f:
+        registryData = yaml.safe_load(f) or {}
+
+    instances = registryData.get("instances") or {}
+    if primaryInstanceName not in instances:
+        print(f"Configured primary instance '{primaryInstanceName}' was not found in {registryPath}. Please check 'general.primaryInstance' in NexaBotConfig.yaml.")
+        input("Press Enter to continue . . .")
+        sys.exit(1)
+
+    # Check that a Head Operator is configured. 
+    headOperatorID = config.get("security.headOperator", 0)
+    if not isinstance(headOperatorID, int) or headOperatorID <= 0 or len(str(headOperatorID)) < 17:
+        print("No valid Head Operator is configured. Please set 'security.headOperator' in NexaBotConfig.yaml to a valid Discord user ID.")
+        input("Press Enter to continue . . .")
+        sys.exit(1)

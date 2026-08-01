@@ -64,8 +64,9 @@ class InstancesCog(commands.Cog):
 
     @app_commands.command(name="start", description="Starts the primary server instance.")
     async def start(self, interaction: Interaction):
-        if not await self.bot.check_terms(interaction):
+        if not await self.bot.guard.evaluate(interaction, "start"):
             return
+        
         instance = self.bot.instance_manager.get_primary_instance()
         if not instance:
             await interaction.response.send_message("No primary instance configured.", ephemeral=True)
@@ -83,8 +84,9 @@ class InstancesCog(commands.Cog):
     @app_commands.describe(instance="The instance to start.")
     @app_commands.autocomplete(instance=_instance_autocomplete)
     async def start_specific(self, interaction: Interaction, instance: str):
-        if not await self.bot.check_terms(interaction):
+        if not await self.bot.guard.evaluate(interaction, "start_specific"):
             return
+        
         tgt = self.bot.instance_manager.get_instance(instance)
         if not tgt:
             await interaction.response.send_message(f"Instance `{instance}` not found.", ephemeral=True)
@@ -97,48 +99,3 @@ class InstancesCog(commands.Cog):
             return
         await interaction.response.send_message(f"Starting `{tgt.name}`…", ephemeral=True)
         asyncio.create_task(self.bot.instance_manager.start_instance(tgt.name))
-
-    @app_commands.command(name="stop", description="Stops the primary server instance.")
-    async def stop(self, interaction: Interaction):
-        if not await self.bot.check_terms(interaction):
-            return
-
-        if self.bot.config.get("discord.preventRandomPeopleFromStoppingInstances", True):
-            if not await self.bot.check_superuser(interaction):
-                await interaction.response.send_message("You do not have permission to stop instances.", ephemeral=True)
-                return
-
-        instance = self.bot.instance_manager.get_primary_instance()
-        if not instance:
-            await interaction.response.send_message("No primary instance configured.", ephemeral=True)
-            return
-        await interaction.response.send_message(f"Stopping `{instance.name}`…", ephemeral=True)
-        status_msg = await self._resolve_status_message()
-
-        async def update_embed(inst: ServerInstance):
-            if status_msg:
-                await status_msg.edit(embed=ServerStatusEmbed(inst).build())
-
-        asyncio.create_task(self.bot.instance_manager.stop_instance(instance.name, update_embed_callback=update_embed))
-
-    @app_commands.command(name="stop_specific", description="Stops a specific instance.")
-    @app_commands.describe(instance="The instance to stop.")
-    @app_commands.autocomplete(instance=_instance_autocomplete)
-    async def stop_specific(self, interaction: Interaction, instance: str):
-        if not await self.bot.check_terms(interaction):
-            return
-
-        if self.bot.config.get("discord.preventRandomPeopleFromStoppingInstances", True):
-            if not await self.bot.check_superuser(interaction):
-                await interaction.response.send_message("You do not have permission to stop instances.", ephemeral=True)
-                return
-
-        tgt = self.bot.instance_manager.get_instance(instance)
-        if not tgt:
-            await interaction.response.send_message(f"Instance `{instance}` not found.", ephemeral=True)
-            return
-        if tgt.status in (ServerStatus.OFFLINE, ServerStatus.SLEEPING):
-            await interaction.response.send_message(f"`{tgt.name}` is already {tgt.status.value}.", ephemeral=True)
-            return
-        await interaction.response.send_message(f"Stopping `{tgt.name}`…", ephemeral=True)
-        asyncio.create_task(self.bot.instance_manager.stop_instance(tgt.name))

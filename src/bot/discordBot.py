@@ -16,18 +16,21 @@ from discord import Interaction, TextChannel
 
 from backend.instanceManager import InstanceManager, ServerStatus, ServerInstance
 from bot.cogs.system import SystemCog
-from services.nexaConfig import NexaConfig, NexaInstanceRegistry
+from services.nexaConfig import NexaConfig, NexaInstanceRegistry, NexaCmdConfig
 from services.nexaDB import protectedDB
 from services import nexaLoggerFactory
+from bot.cmdServices.nxbotCmdInstanceEmbeds import InstanceEmbedTracker
+from bot.cmdServices.nxbotGuard import NxbotGuard
 
 from .ui import SimpleMenu, MenuButton, ServerStatusEmbed
 from .cogs.general import GeneralCog
 from .cogs.instances import InstancesCog
 from .cogs.superuser import SuperUserCog
+from .cogs.operator import OperatorCog
 
 logger = nexaLoggerFactory.get_logger("DiscordBot")
 
-VERSION = "Nexa v0.2.2-beta"
+VERSION = "Nexa v0.3.0-beta"
 
 
 class NexaBot(commands.Bot):
@@ -43,6 +46,7 @@ class NexaBot(commands.Bot):
         *,
         registry: NexaInstanceRegistry | str | None = None,
         config: NexaConfig | str | None = None,
+        cmdConfig: NexaCmdConfig | str | None = None,
         statusChannelID: int | None = None,
         nexaUpdateStatus: int,
         isResurrected: bool = False
@@ -65,6 +69,11 @@ class NexaBot(commands.Bot):
             registry if isinstance(registry, str) else "NexaInstanceRegistry.yaml"
         )
 
+        # Command Config
+        self.cmdConfig = cmdConfig if isinstance(cmdConfig, NexaCmdConfig) else(
+            config if isinstance(cmdConfig, str) else "NexaBotCmdCfg.yaml"
+        )
+
         self.statusChannelID = statusChannelID or self.config.get("discord.statusChannel", None)
         self.healthChannelID = self.config.get("discord.healthIssuesChannelID", None)
         self.updateInterval  = int(self.config.get("general.updateInterval", 10))
@@ -81,6 +90,12 @@ class NexaBot(commands.Bot):
             password=db_key,
             create_if_missing=True
         )
+
+        # Instance embed tracker
+        self.instanceEmbeds = InstanceEmbedTracker()
+
+        # Guard
+        self.guard = NxbotGuard(self, self.cmdConfig)
 
         self._hydrate_instances()
 
@@ -113,9 +128,16 @@ class NexaBot(commands.Bot):
         )
     
     def _is_server_operator(self, user_id: int) -> bool:
+        #print(f"Server Ops Enable: {self.config.get("security.enableServerOperators", "Could not fetch.")}")
+        #print(f"Result: {user_id in (self.config.get("security.serverOperators") or [])}")
         return (
             self.config.get("security.enableServerOperators", False)
             and user_id in (self.config.get("security.serverOperators") or [])
+        )
+    
+    def _is_head_operator(self, user_id: int) -> bool:
+        return (
+            self.config.get("security.headOperator", 0) == user_id
         )
 
     def _has_agreed_to_terms(self, user_id: int) -> bool:
@@ -160,7 +182,7 @@ class NexaBot(commands.Bot):
             description=(
                 "In order to use Nexa, you must agree to our data usage terms:\n\n"
                 "- We store a mapping of your Discord ID to any Minecraft accounts you link.\n"
-                "- We store a list of any Nexus apps you authorize.\n"
+                "- We store a list of any Nexa Routines you authorize.\n"
                 "- We store privacy settings you configure.\n\n"
                 "Your data is encrypted and never shared with third parties.\n\n"
                 "Click **I Agree** to continue."
@@ -208,6 +230,19 @@ class NexaBot(commands.Bot):
             "You do not have permission to use this command.", ephemeral=True
         )
         return False
+    
+    async def check_head_operator(self, interaction: Interaction) -> bool:
+        if not await self.check_guild(interaction):
+            await interaction.response.send_message(
+                "An unknown error occurred.", ephemeral=True
+            )
+            logger.warning(f"check_head_operator called for user {interaction.user} ({interaction.user.id}) in unauthorized guild {interaction.guild_id}.")
+            return False
+        if self._is_head_operator(interaction.user.id):
+            return True
+        await interaction.response.send_message(
+            "This command is restricted to the head operator. You do not have permission to use this command.", ephemeral=True
+        )
     # ---------------------------------------------------------------------------
     # Instance hydration
     # ---------------------------------------------------------------------------
@@ -248,6 +283,7 @@ class NexaBot(commands.Bot):
         await self.add_cog(InstancesCog(self))
         await self.add_cog(SuperUserCog(self))
         await self.add_cog(SystemCog(self))
+        await self.add_cog(OperatorCog(self))
 
     async def on_ready(self):
         logger.info(f"Logged in as {self.user}")
@@ -284,6 +320,24 @@ class NexaBot(commands.Bot):
     # Live status loop
     # ---------------------------------------------------------------------------
 
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type != discord.InteractionType.component:
+            return
+    
+        custom_id = interaction.data.get("custom_id", "")
+        if not custom_id.startswith("start_instance:"):
+            return
+    
+        instance_name = custom_id.split(":", 1)[1]
+    
+        cog = self.get_cog("InstancesCog")
+        if cog is None:
+            await interaction.response.send_message("Instance commands are unavailable right now.", ephemeral=True)
+            return
+    
+        await cog.start_specific.callback(cog, interaction, instance_name)
+
+
     def _embed_fingerprint(self, embed: discord.Embed) -> str:
         """Cheap hash of the embed's visible content for change detection."""
         parts = [
@@ -295,6 +349,33 @@ class NexaBot(commands.Bot):
         ]
         return hashlib.md5("|".join(parts).encode()).hexdigest()
 
+    async def _resolve_status_message(
+        self, channel: TextChannel, name: str, instance: ServerInstance
+    ) -> discord.Message:
+        """
+        Resolves the tracked status embed message for an instance, creating
+        and registering a new one if none is tracked or the tracked message
+        no longer exists.
+        """
+        link = self.instanceEmbeds.getEmbed(name)
+
+        if link:
+            try:
+                channel_id_str, message_id_str = link.split(":", 1)
+                msg_channel = self.get_channel(int(channel_id_str)) or channel
+                return await msg_channel.fetch_message(int(message_id_str))
+            except (discord.NotFound, discord.Forbidden, ValueError):
+                logger.warning(f"Tracked embed for '{name}' is stale or invalid. Creating a new one.")
+            except Exception as e:
+                logger.warning(f"Failed to resolve tracked embed for '{name}': {e}. Creating a new one.")
+
+        status_embed = ServerStatusEmbed(instance)
+        view = status_embed.build_view()
+
+        msg = await channel.send(embed=status_embed.build(), view=view)
+        self.instanceEmbeds.newEmbed(name, f"{msg.channel.id}:{msg.id}")
+        return msg
+
     async def _live_status_loop(self):
         await self.wait_until_ready()
         channel: TextChannel | None = self.get_channel(self.statusChannelID) if self.statusChannelID else None
@@ -302,21 +383,9 @@ class NexaBot(commands.Bot):
             logger.warning(f"Status channel '{self.statusChannelID}' not found or not configured.")
             return
 
-        existing: dict[str, discord.Message] = {}
-        async for msg in channel.history(limit=50):
-            if msg.author == self.user and msg.embeds:
-                title = msg.embeds[0].title or ""
-                for name in self.instance_manager.instances:
-                    if name in title and name not in existing:
-                        existing[name] = msg
-
         status_messages: dict[str, discord.Message] = {}
         for name, instance in self.instance_manager.instances.items():
-            if name in existing:
-                status_messages[name] = existing[name]
-            else:
-                msg = await channel.send(embed=ServerStatusEmbed(instance).build())
-                status_messages[name] = msg
+            status_messages[name] = await self._resolve_status_message(channel, name, instance)
 
         status_fingerprints: dict[str, str] = {}
 
@@ -326,23 +395,28 @@ class NexaBot(commands.Bot):
                 if not msg:
                     continue
 
-                embed = ServerStatusEmbed(instance).build()
+                status_embed = ServerStatusEmbed(instance)
+                embed = status_embed.build()
                 if instance.status == ServerStatus.SLEEPING:
                     embed.title += ": Sleeping"
                 if getattr(instance, "locked", False):
                     embed.title += " 🔒"
+                view = status_embed.build_view()
 
                 fp = self._embed_fingerprint(embed)
                 if status_fingerprints.get(name) == fp:
                     continue
-
+                
                 try:
-                    await msg.edit(embed=embed)
+                    await msg.edit(embed=embed, view=view)
                     status_fingerprints[name] = fp
                 except discord.NotFound:
-                    new_msg = await channel.send(embed=ServerStatusEmbed(instance).build())
+                    status_embed = ServerStatusEmbed(instance)
+                    new_msg = await channel.send(embed=status_embed.build(), view=status_embed.build_view())
                     status_messages[name] = new_msg
                     status_fingerprints[name] = fp
+                    self.instanceEmbeds.newEmbed(name, f"{new_msg.channel.id}:{new_msg.id}")
+                    logger.warning(f"Status embed for '{name}' was deleted externally. Recreated and re-tracked.")
                 except Exception as e:
                     logger.warning(f"Failed to update status embed for '{name}': {e}")
 

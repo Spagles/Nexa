@@ -27,14 +27,11 @@ class GeneralCog(commands.Cog):
             return
         await interaction.response.send_message(f"Latency: {self.bot.latency:.2f}s", ephemeral=True)
 
-    @app_commands.command(name="refresh_cmds", description="Tricks Discord into refreshing commands for a client.")
-    async def refresh_cmds(self, interaction: Interaction):
-        await interaction.response.send_message("Commands up to date.", ephemeral=True)
-
     @app_commands.command(name="status", description="Shows server stats.")
     async def status(self, interaction: Interaction):
-        if not await self.bot.check_terms(interaction):
+        if not await self.bot.guard.evaluate(interaction, "status"):
             return
+        
         instance = self.bot.instance_manager.get_primary_instance()
         if not instance:
             await interaction.response.send_message("No server instance is configured.", ephemeral=True)
@@ -64,7 +61,7 @@ class GeneralCog(commands.Cog):
         )
         await menu.send(interaction)
 
-    @app_commands.command(name="userdata", description="Show and manage your user data stored by NexaBot.")
+    @app_commands.command(name="userdata", description="Show and manage your user data stored by Nexa.")
     async def userdata(self, interaction: Interaction):
         if not await self.bot.check_terms(interaction):
             return
@@ -78,7 +75,7 @@ class GeneralCog(commands.Cog):
         menu.add_page(
             title="Introduction",
             description=(
-                "This section allows you to view and manage your user data stored by NexaBot.\n\n"
+                "This section allows you to view and manage your user data stored by Nexa.\n\n"
                 "The following pages will allow you to see what data is stored, and perform data management actions."
             )
         )
@@ -92,10 +89,10 @@ class GeneralCog(commands.Cog):
 
         authed_apps = user_data.get("authorizedNexusApps", [])
         menu.add_page(
-            title="Authorized Nexus Applications",
+            title="Authorized Nexa Routines",
             description=(
                 "\n".join(f"- {app}" for app in authed_apps)
-                if authed_apps else "You have not authorized any applications."
+                if authed_apps else "You have not authorized any Routines."
             )
         )
 

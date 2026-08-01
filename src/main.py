@@ -7,11 +7,17 @@ import os
 import requests
 import subprocess
 import sys
+import asyncio
 from pathlib import Path
 from bot.discordBot import NexaBot
 from backend.instanceManager import InstanceManager, ServerInstance, ServerStatus
 from services.nexaDB import unprotectedDB, protectedDB
 from services import nexaLoggerFactory
+from services.nexaAuthenticationService import (
+    NexaAuthenticationService,
+    HeadOperatorKeyMissingError,
+    HeadOperatorKeyInvalidError,
+)
 from ensureStability import checkIfAbleToRun
 import argparse
 
@@ -20,12 +26,16 @@ import argparse
 SELF_PATH = os.path.abspath(sys.argv[0])
 
 # Load Config
-from services.nexaConfig import NexaConfig, NexaInstanceRegistry
+from services.nexaConfig import NexaConfig, NexaInstanceRegistry, NexaCmdConfig
 
 config = NexaConfig("NexaBotConfig.yaml")
 registry = NexaInstanceRegistry("NexaInstanceRegistry.yaml")
+cmdConfig = NexaCmdConfig("NexaBotCmdCfg.yaml")
 
-currentNexaVersion = "0.2.2" # This should be updated with every release. Please do not touch it if a release is not being made.
+# Protected DB password, guaranteed present by checkIfAbleToRun()
+db_key = os.environ.get("NEXABOT_PROTECTED_KEY")
+
+currentNexaVersion = "0.3.0-beta" # This should be updated with every release. Please do not touch it if a release is not being made.
 whereIsThatSillyUpdateIndex = "https://raw.githubusercontent.com/StormCode-dev/Nexa/refs/heads/main/updateIndex.json" # This should point to a raw JSON file in the repo with the latest version info. 
 # Please do not touch it. It points to the main branch, which is the correct branch.
 
@@ -142,6 +152,29 @@ def main():
 
     kill_orphaned_java()  # Clean up any leftover Java processes from previous runs before starting
 
+    # Bootstrap the Head Operator authentication key. This must run in the real worker
+    # process (never the watchdog parent, which never reaches this line) and before the
+    # Discord bot starts, since /keyman and filesystem-access-gated cogs depend on
+    # authService.isConfigured being accurate by the time they register.
+    keySystem = protectedDB(
+        dbPath=Path("databases") / "keys.nxdb",
+        password=db_key,
+        create_if_missing=True
+    )
+
+    authService = NexaAuthenticationService(protectedDB=keySystem, configClass=config)
+
+    # bootstrap() is async because its stray-file-warning path may need to await a
+    # notifier DM to the Head Operator. main() itself is synchronous, so this one
+    # call gets its own short-lived event loop via asyncio.run() rather than
+    # requiring the whole startup sequence to become async just for this.
+    try:
+        asyncio.run(authService.bootstrap())
+        logger.info("Head Operator authentication key verified/loaded successfully.")
+    except (HeadOperatorKeyMissingError, HeadOperatorKeyInvalidError) as e:
+        logger.error(f"Head Operator authentication bootstrap failed: {e}")
+        raise RuntimeError("Head Operator authentication key bootstrap failed") from e
+
     logger.info("Checking for updates...")
     update_status = check_for_updates()
 
@@ -189,6 +222,7 @@ def main():
         for name in instance_names:
             try:
                 inst_cfg = registry.get_instance(name) or {}
+                disp_name = inst_cfg.get("displayName", str(name))
                 folder = build_folder_for_instance(instances_root, name, inst_cfg)
                 version = inst_cfg.get("version", "")
                 loader = inst_cfg.get("loaderType") or inst_cfg.get("loader") or ""
@@ -196,6 +230,7 @@ def main():
 
                 manager.add_instance(ServerInstance(
                     name=name,
+                    disp_name = disp_name,
                     folder=folder,
                     version=version,
                     loader=loader,
@@ -229,7 +264,7 @@ def main():
 
     # Start Discord bot IF enabled in config
     if config.get("discord.enable", False):
-        bot = NexaBot(token=token, instance_manager=manager, registry=registry, config=config, statusChannelID=config.get("discord.statusChannelID", None), nexaUpdateStatus=update_status, isResurrected=args.resurrected)
+        bot = NexaBot(token=token, instance_manager=manager, registry=registry, config=config, cmdConfig=cmdConfig, statusChannelID=config.get("discord.statusChannelID", None), nexaUpdateStatus=update_status, isResurrected=args.resurrected)
         bot.start_bot()
         logger.info("Discord bot started.")
 
