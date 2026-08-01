@@ -83,7 +83,7 @@ class NexaAuthenticationService:
 
     # --- Operator key (/keyman) settings ---
     OPERATOR_KEYS_ROOT = "additionalOperatorKeys"
-    KNOWN_CAPABILITIES = {"modpackInstalls", "fsaccess"}  # extend as new capabilities are added
+    KNOWN_CAPABILITIES = {"modpackInstalls", "fsaccess", "lockAndUnlockInstances", "executeRCON"}  # extend as new capabilities are added
 
     # Operator codes use a FIXED salt (unlike the Head Operator's per-entry salt) so that
     # verifyOperatorKey() can hash the candidate once and do a direct dict-key lookup - true

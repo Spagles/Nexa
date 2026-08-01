@@ -619,12 +619,14 @@ class OperatorCog(commands.Cog):
 
         tgt.locked = True
         logger.info(f"Instance '{instance}' locked by {interaction.user} ({interaction.user.id}) in prep for file access.")
-    
+
         try:
             jail_root = _resolve_instance_folder(self.bot, instance)
         except ValueError as exc:
             logger.error(f"An error occured while setting up the SFTP Connection: {str(exc)}")
             await responder.send("An error occurred.", ephemeral=True)
+            tgt.locked = False
+            logger.info(f"Instance '{instance}' unlocked automatically by Nexa due to jail root resolution failure.")
             return
 
         require_approval = self.bot.cmdConfig.get("commands.fsaccess.askHeadOperatorForApproval", True)
@@ -634,6 +636,8 @@ class OperatorCog(commands.Cog):
                 head_user = await self.bot.fetch_user(head_operator_id)
                 if head_user is None:
                     await responder.send("The configured Head Operator could not be resolved.", ephemeral=True)
+                    tgt.locked = False
+                    logger.info(f"Instance '{instance}' unlocked automatically by Nexa due to head operator resolution failure.")
                     return
 
                 APPROVAL_TIMEOUT_SECONDS = 300  # 5 mins
@@ -672,13 +676,19 @@ class OperatorCog(commands.Cog):
                             task.cancel()
 
                 if not done:
-                    await interaction.followup.send("Head Operator approval timed out.", ephemeral=True)
+                    # responder.send() is guaranteed at least deferred by
+                    # this point (the "Awaiting Approval" responder.send()
+                    # call above always fires when require_approval is True),
+                    # but using responder.send() rather than a raw
+                    # interaction.followup.send() keeps this correct even if
+                    # that assumption ever changes upstream.
+                    await responder.send("Head Operator approval timed out.", ephemeral=True)
                     tgt.locked = False
                     logger.info(f"Instance '{instance}' unlocked automatically by Nexa due to fsaccess command failure.")
                     return
 
                 if view.denied.is_set():
-                    await interaction.followup.send("Head Operator denied the request.", ephemeral=True)
+                    await responder.send("Head Operator denied the request.", ephemeral=True)
                     tgt.locked = False
                     logger.info(f"Instance '{instance}' unlocked automatically by Nexa due to fsaccess command failure.")
                     return
@@ -686,7 +696,14 @@ class OperatorCog(commands.Cog):
         try:
             session = await self.sftpService.beginSession(str(jail_root), interaction.user.id)
         except RuntimeError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
+            # This is the actual bug: with requireAuthentication AND
+            # askHeadOperatorForApproval both False, interaction.response
+            # was never consumed by anything above -- a raw followup.send()
+            # here fails silently client-side ("The application did not
+            # respond"), because Discord never received an initial response.
+            await responder.send(str(exc), ephemeral=True)
+            tgt.locked = False
+            logger.info(f"Instance '{instance}' unlocked automatically by Nexa due to an unexpected Runtime Error.")
             return
 
         nxbotCmdGeneral.registerOperation(
@@ -715,7 +732,10 @@ class OperatorCog(commands.Cog):
             delete_after=90.0
         )
 
-        await interaction.followup.send(
+        # Same bug, same fix: this is the exact line you caught in testing.
+        # With both toggles off, this was the first and only response
+        # attempt on an interaction whose .response had never been touched.
+        await responder.send(
             "Your temporary SFTP access details were sent to your DMs. Access this and download your data immediately. The details will be deleted in 90 seconds.",
             ephemeral=True,
         )

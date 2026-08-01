@@ -84,3 +84,10 @@ def checkIfAbleToRun(config: NexaConfig):
         print(f"Configured primary instance '{primaryInstanceName}' was not found in {registryPath}. Please check 'general.primaryInstance' in NexaBotConfig.yaml.")
         input("Press Enter to continue . . .")
         sys.exit(1)
+
+    # Check that a Head Operator is configured. 
+    headOperatorID = config.get("security.headOperator", 0)
+    if not isinstance(headOperatorID, int) or headOperatorID <= 0 or len(str(headOperatorID)) < 17:
+        print("No valid Head Operator is configured. Please set 'security.headOperator' in NexaBotConfig.yaml to a valid Discord user ID.")
+        input("Press Enter to continue . . .")
+        sys.exit(1)
