@@ -368,7 +368,7 @@ class InstanceManager:
                     # so start reading from the current end, not byte 0.
                     log_inode = current_inode
                     read_pos = current_size
-                elif current_inode != log_inode:
+                elif current_inode != log_inode or current_size < read_pos:
                     log_inode = current_inode
                     read_pos = 0
 
