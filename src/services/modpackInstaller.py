@@ -495,7 +495,7 @@ class ModpackInstaller:
  
         while elapsed < timeout:
             try:
-                with MCRcon("127.0.0.1", staged_rcon_password, port=staged_rcon_port, timeout=timeout) as rcon:
+                with MCRcon("127.0.0.1", staged_rcon_password, port=staged_rcon_port, timeout=5) as rcon:
                     # Test 1: Basic command to see if RCON is responsive
                     response = rcon.command("list")
                     if response is not None:
